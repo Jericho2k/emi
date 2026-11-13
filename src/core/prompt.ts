@@ -54,7 +54,9 @@ export function renderHistory(history: StoredMessage[], tz: string): ChatMessage
       if (newDay || longGap) content = `[${describeMoment(message.createdAt, tz)}]\n${content}`;
     }
     previous = message.createdAt;
-    const role = message.role === "user" ? "user" : "assistant";
+    // What the app displayed for a command sits on the person's side of the
+    // history, next to the command: nothing Emi did not write is in her voice.
+    const role = message.role === "user" || message.kind === "command" ? "user" : "assistant";
     const last = out[out.length - 1];
     // Providers want turns to alternate, and two in a row from one side are
     // one turn anyway.

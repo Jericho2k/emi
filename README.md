@@ -56,12 +56,21 @@ npm run typecheck
 
 Commands and the confirmations Emi actually sends are saved in the same
 conversation history as chat. `/key` arguments are redacted before storage;
-the key itself is still stored only in its encrypted field. In model context,
-commands are labeled as user commands and their confirmations as app-generated
-responses, so Emi can distinguish the app's actions from her own generated
-replies. These labels appear only in model context; Telegram messages, stored
-text, and Emi's persona stay unchanged. Existing saved command exchanges get
-the labels when read, without a database migration.
+the key itself is still stored only in its encrypted field.
+
+Emi sees commands, and she knows what they are. Her persona says that the
+memory and the agenda are her own, lists the commands, and says the app
+answers them without her. In model context a command and what the app
+displayed both sit on the person's side of the history, as "they used a
+command" followed by what was shown, so nothing she did not write is in her
+voice. This framing matters: when the app was presented as a separate thing,
+she disowned her own agenda and talked about transcripts. The wording exists
+only in model context; Telegram messages and stored text are unchanged, and
+saved command exchanges are reframed when read, with no migration.
+
+Asking her in conversation to drop an agenda item or forget something works
+like the commands do. The extractor closes the item or erases the memory, and
+only when the request is quoted from the person's own message.
 
 Replies carry a separate snapshot of the original text or caption and any
 selected quote, including replies to messages outside the recent history

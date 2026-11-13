@@ -5,7 +5,7 @@ import { planWindows } from "./agenda/policy";
 import { awaitingReaction, pendingItems, setStatus, upsertAgendaItem } from "./agenda/store";
 import { describeMoment, hasTimeOfDay, isValidTimeZone, localParts, localToUtc } from "./clock";
 import { decide, evidenceIsExact, looksSensitive, type Candidate } from "./memory/reconcile";
-import { activeMemories, insertMemory, memoriesByIds, nearestMemories, supersedeMemory, type Neighbour } from "./memory/store";
+import { activeMemories, deleteMemory, insertMemory, memoriesByIds, nearestMemories, supersedeMemory, type Neighbour } from "./memory/store";
 import { messageContent } from "./message";
 import { MOOD_LABELS } from "./persona";
 import { MEMORY_KINDS, type AgendaItem, type Deps, type Memory, type MemoryKind, type User } from "./types";
@@ -55,6 +55,8 @@ Return one JSON object with these fields:
 
 "agenda_close": pending agenda items (by id like "a2") that are now settled because the person talked about how it went, cancelled it, or said to drop it. Each {"id": "a2", "note": short}.
 
+"forget": stored memories (by id like "m3") that the person explicitly asked Emi to forget, or said are wrong and should be removed. Each {"id": "m3", "evidence": an EXACT quote of that request}. Only on an explicit request; a changed fact is "supersedes", not this.
+
 "ping_reaction": only when a recent check-in from Emi is shown. How they took it: "satisfied" (they answered it), "later" (not now, but fine to ask again), "brushoff" (they don't want to be checked on), or "none" (their message is unrelated).
 
 "mood": how the exchange leaves EMI feeling, or null if nothing changed. {"label": one of ${MOOD_LABELS.join(", ")}, "reason": a few words}.
@@ -82,6 +84,7 @@ const AgendaSchema = z.object({
   closes_when: z.string().trim().max(200).nullish(),
 });
 const CloseSchema = z.object({ id: z.string(), note: z.string().max(200).nullish() });
+const ForgetSchema = z.object({ id: z.string(), evidence: text(500) });
 
 const list = <T>(schema: z.ZodType<T>, value: unknown, max: number): T[] =>
   (Array.isArray(value) ? value : []).map((item) => schema.safeParse(item)).flatMap((r) => (r.success ? [r.data] : [])).slice(0, max);
@@ -97,6 +100,7 @@ export interface ExtractionSummary {
   memoriesSuperseded: number;
   agendaCreated: number;
   agendaClosed: number;
+  memoriesForgotten: number;
 }
 
 export async function runExtraction(deps: Deps, userId: string, hint: { memoryIds?: string[] } = {}): Promise<ExtractionSummary | null> {
@@ -121,7 +125,7 @@ async function extract(deps: Deps, userId: string, hintIds: string[]): Promise<E
   const theirs = batch.filter((message) => message.role === "user" && message.kind !== "command");
   const source = theirs.map((message) => message.content).join("\n");
   const now = deps.clock();
-  const summary: ExtractionSummary = { memoriesAdded: 0, memoriesSuperseded: 0, agendaCreated: 0, agendaClosed: 0 };
+  const summary: ExtractionSummary = { memoriesAdded: 0, memoriesSuperseded: 0, agendaCreated: 0, agendaClosed: 0, memoriesForgotten: 0 };
   const done = async () => { await updateUser(db, userId, { extractedThrough: last.id }); return summary; };
 
   const awaiting = await awaitingReaction(db, userId, now);
@@ -194,6 +198,13 @@ async function extract(deps: Deps, userId: string, hintIds: string[]): Promise<E
     if (!item) continue;
     await setStatus(db, item.id, "done", close.note ?? "settled in conversation", now);
     summary.agendaClosed += 1;
+  }
+  // "Forget that" in conversation works like /forget, and needs their own words for it.
+  for (const forget of list(ForgetSchema, data.forget, 4)) {
+    const memory = memoryLabels.find(({ label }) => label === forget.id.trim().toLowerCase())?.memory;
+    if (!memory || !evidenceIsExact(forget.evidence, source)) continue;
+    await deleteMemory(db, userId, memory.id, now);
+    summary.memoriesForgotten += 1;
   }
   if (awaiting) await applyReaction(deps, user, awaiting, String(data.ping_reaction ?? "none"), now);
 

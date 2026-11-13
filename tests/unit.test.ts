@@ -146,7 +146,7 @@ describe("prompt", () => {
     expect([50, 51, 60, 69].map((total) => total - historyWindow(total))).toEqual([20, 20, 20, 20]);
     expect(70 - historyWindow(70)).toBe(40);
   });
-  it("marks saved command responses without mislabeling adjacent AI replies or losing quote context", () => {
+  it("shows a command and what the app displayed on the person's side, never in Emi's voice", () => {
     const base = { agendaItemId: null, createdAt: now };
     const history: StoredMessage[] = [
       { ...base, id: 1, role: "user", kind: "command", content: "/timezone probe-482" },
@@ -155,12 +155,12 @@ describe("prompt", () => {
       { ...base, id: 4, role: "user", kind: "reply", content: "that one", replyTo: { author: "emi", text: "invalid timezone" } },
     ];
     const rendered = renderHistory(history, "UTC");
-    const assistant = rendered.find((m) => m.role === "assistant")!.content;
-    expect(assistant).toContain("App-generated command response");
-    expect(assistant).toContain("invalid timezone");
-    expect(assistant).toContain("[End app-generated command response]\n---\nhere's what happened");
+    expect(rendered.map((m) => m.role)).toEqual(["user", "assistant", "user"]);
+    expect(rendered[0]!.content).toContain("[They used a command: /timezone probe-482]");
+    expect(rendered[0]!.content).toContain("This is what it showed them:\ninvalid timezone\n]");
+    expect(rendered[1]!.content).toBe("here's what happened");
     expect(rendered.at(-1)!.content).toContain('"author":"emi","text":"invalid timezone"');
-    expect(rendered.at(-1)!.content).not.toContain("App-generated command response");
+    expect(rendered.at(-1)!.content).not.toContain("They used a command");
     expect(history[1]!.content).toBe("invalid timezone");
   });
   it("stamps a message when the day changes or an hour passes, and merges same-side turns", () => {

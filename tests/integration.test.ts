@@ -261,6 +261,24 @@ describe("the daily planner", () => {
 });
 
 describe("forgetting", () => {
+  it("forgets in conversation only when they really asked", async () => {
+    const w = await world();
+    const user = await w.newUser();
+    const add = (content: string) => insertMemory(w.db, { userId: user.id, kind: "identity", content, embedding: fakeEmbedding(content), at: w.now });
+    await add("Works at a bank");
+    await add("Has a cat called Miso");
+    await handleTurn(w.deps, user.id, "please forget that I work at a bank");
+    w.script = byModel({ utility: (messages) => {
+      const id = (content: string) => new RegExp(`(m\\d+) \\[identity\\] ${content}`).exec(messages[1]!.content)![1];
+      return JSON.stringify({ forget: [
+        { id: id("Works at a bank"), evidence: "forget that I work at a bank" },
+        { id: id("Has a cat called Miso"), evidence: "forget the cat" }, // not something they said
+      ] });
+    } });
+    expect((await runExtraction(w.deps, user.id))?.memoriesForgotten).toBe(1);
+    expect((await activeMemories(w.db, user.id)).map((m) => m.content)).toEqual(["Has a cat called Miso"]);
+  });
+
   it("blanks the text, not just the flag", async () => {
     const w = await world();
     const user = await w.newUser();
