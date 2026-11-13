@@ -56,7 +56,12 @@ npm run typecheck
 
 Commands and the confirmations Emi actually sends are saved in the same
 conversation history as chat. `/key` arguments are redacted before storage;
-the key itself is still stored only in its encrypted field.
+the key itself is still stored only in its encrypted field. In model context,
+commands are labeled as user commands and their confirmations as app-generated
+responses, so Emi can distinguish the app's actions from her own generated
+replies. These labels appear only in model context; Telegram messages, stored
+text, and Emi's persona stay unchanged. Existing saved command exchanges get
+the labels when read, without a database migration.
 
 Replies carry a separate snapshot of the original text or caption and any
 selected quote, including replies to messages outside the recent history
