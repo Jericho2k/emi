@@ -1,7 +1,7 @@
 import type { Db } from "../db";
 import type { Usage } from "../llm/provider";
 import { localParts, localToUtc } from "./clock";
-import { INITIATIVE_LEVELS, type Initiative, type Mood, type StoredMessage, type User } from "./types";
+import { INITIATIVE_LEVELS, type Initiative, type Mood, type ReplyContext, type StoredMessage, type User } from "./types";
 
 type Row = Record<string, any>;
 
@@ -101,14 +101,15 @@ export function lowerInitiative(level: Initiative): Initiative {
 function messageFromRow(row: Row): StoredMessage {
   return {
     id: Number(row.id), role: row.role, content: row.content, kind: row.kind,
+    replyTo: row.reply_context ?? undefined,
     agendaItemId: row.agenda_item_id ?? null, createdAt: toDate(row.created_at)!,
   };
 }
 
-export async function addMessage(db: Db, input: { userId: string; role: "user" | "emi"; content: string; kind?: "reply" | "proactive"; agendaItemId?: string | null; at: Date }): Promise<StoredMessage> {
+export async function addMessage(db: Db, input: { userId: string; role: "user" | "emi"; content: string; kind?: StoredMessage["kind"]; replyTo?: ReplyContext; agendaItemId?: string | null; at: Date }): Promise<StoredMessage> {
   const { rows } = await db.query<Row>(
-    "insert into messages (user_id, role, content, kind, agenda_item_id, created_at) values ($1, $2, $3, $4, $5, $6) returning *",
-    [input.userId, input.role, input.content, input.kind ?? "reply", input.agendaItemId ?? null, input.at],
+    "insert into messages (user_id, role, content, kind, agenda_item_id, created_at, reply_context) values ($1, $2, $3, $4, $5, $6, $7::jsonb) returning *",
+    [input.userId, input.role, input.content, input.kind ?? "reply", input.agendaItemId ?? null, input.at, input.replyTo ? JSON.stringify(input.replyTo) : null],
   );
   await updateUser(db, input.userId, input.role === "user" ? { lastUserMessageAt: input.at } : { lastEmiMessageAt: input.at });
   return messageFromRow(rows[0]!);

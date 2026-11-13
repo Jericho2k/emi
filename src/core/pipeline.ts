@@ -2,7 +2,8 @@ import { ProviderError } from "../llm/openrouter";
 import { absorbOnUserMessage, openForWeave, setStatus } from "./agenda/store";
 import { recall } from "./memory/recall";
 import { agendaLabel, buildTurnMessages, classifyTurn, historyWindow, joinBubbles, parseReply, type TurnKind } from "./prompt";
-import type { Deps } from "./types";
+import { messageContent } from "./message";
+import type { Deps, IncomingMessage } from "./types";
 import { addMessage, getUser, messageCount, recentMessages, recordUsage } from "./users";
 
 export interface TurnResult {
@@ -29,7 +30,11 @@ const SETTINGS: Record<TurnKind, { temperature: number; maxTokens: number }> = {
  * Exactly one model call sits on this path (plus one small embedding). Every
  * other piece of thinking, extraction included, happens after the reply.
  */
-export async function handleTurn(deps: Deps, userId: string, text: string): Promise<TurnResult> {
+export async function handleTurn(deps: Deps, userId: string, input: string | IncomingMessage[]): Promise<TurnResult> {
+  const incoming = typeof input === "string" ? [{ text: input }] : input;
+  if (!incoming.length) throw new Error("a turn needs at least one message");
+  const text = incoming.map((message) => message.text).join("\n");
+  const content = incoming.map(messageContent).join("\n\n");
   const { db } = deps;
   const user = await getUser(db, userId);
   if (!user) throw new Error(`unknown user ${userId}`);
@@ -39,7 +44,9 @@ export async function handleTurn(deps: Deps, userId: string, text: string): Prom
   // Read the history before storing, so the new message is not in it twice.
   const history = await recentMessages(db, userId, historyWindow(await messageCount(db, userId)));
   const previousUserAt = user.lastUserMessageAt;
-  await addMessage(db, { userId, role: "user", content: text, at: now });
+  for (const message of incoming) {
+    await addMessage(db, { userId, role: "user", content: message.text, replyTo: message.replyTo, at: now });
+  }
 
   // They wrote first: anything she planned to send becomes something she can
   // raise here instead. Done before the reply so no ping can race it.
@@ -59,7 +66,10 @@ export async function handleTurn(deps: Deps, userId: string, text: string): Prom
   }
   const recalled = await recall(db, userId, text, queryVector, now);
 
-  const messages = buildTurnMessages({ user, now, recall: recalled, weave, turnKind, previousUserAt }, history, text);
+  const messages = buildTurnMessages({
+    user, now, recall: recalled, weave, turnKind, previousUserAt,
+    hasPriorConversation: history.length > 0 || incoming.some((message) => !!message.replyTo),
+  }, history, content);
   let reply;
   try {
     reply = await llm.chat(messages, { model: deps.models.writer, ...SETTINGS[turnKind] });

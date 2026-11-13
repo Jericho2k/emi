@@ -52,6 +52,28 @@ npm run typecheck
 | `/quiet <from> <to>` | Hours she stays silent. |
 | `/usage`, `/cap <usd>` | Today's cost, and the daily limit on what she spends unasked. |
 
+## Telegram conversation context
+
+Commands and the confirmations Emi actually sends are saved in the same
+conversation history as chat. `/key` arguments are redacted before storage;
+the key itself is still stored only in its encrypted field.
+
+Replies carry a separate snapshot of the original text or caption and any
+selected quote, including replies to messages outside the recent history
+window. Each message keeps its own reply context when several messages are
+batched into one turn. When Telegram supplies only a quote, Emi gets that
+quote; unavailable original content is explicitly marked as unavailable.
+
+Telegram parsing lives in `src/channels/telegram-input.ts`. The core uses
+channel-independent `IncomingMessage` and `ReplyContext` types and a shared
+renderer for current messages, history, and extraction. Quoted words are not
+accepted as evidence of a new personal fact, and command exchanges are not
+re-extracted into memories. Commands and chat share a per-person queue.
+
+Existing installations apply `0002_message_context.sql` automatically on
+startup. Earlier command exchanges were never stored and cannot be recovered
+unless Telegram includes them in a new reply.
+
 ## How it works
 
 **A turn** (`src/core/pipeline.ts`) makes one model call, plus one small embedding. The prompt is ordered so providers can cache it: the persona first, then the history in a window that moves in blocks of twenty, then the notes that change every turn (local time, recalled memories, things to bring up).

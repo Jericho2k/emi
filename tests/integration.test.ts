@@ -271,3 +271,49 @@ describe("forgetting", () => {
     expect(await activeMemories(w.db, user.id)).toHaveLength(0);
   });
 });
+
+describe("reply context and command history", () => {
+  it("keeps an old reply target available after the original has left the history window", async () => {
+    const w = await world();
+    const user = await w.newUser();
+    const { addMessage } = await import("../src/core/users");
+    await addMessage(w.db, { userId: user.id, role: "emi", content: "Your appointment is at 4pm", at: w.now });
+    for (let i = 0; i < 60; i++) {
+      await addMessage(w.db, { userId: user.id, role: i % 2 ? "emi" : "user", content: `filler ${i}`, at: w.now });
+    }
+    await handleTurn(w.deps, user.id, [{ text: "move that to five", replyTo: { author: "emi", text: "Your appointment is at 4pm", quote: "4pm" } }]);
+    const prompt = w.calls.at(-1)!.messages;
+    expect(prompt.slice(0, -1).some((m) => m.content.includes("appointment"))).toBe(false);
+    expect(prompt.at(-1)!.content).toContain("Your appointment is at 4pm");
+    expect(prompt.at(-1)!.content).toContain('"quote":"4pm"');
+    await handleTurn(w.deps, user.id, "what did I ask you to move?");
+    expect(w.calls.at(-1)!.messages.map((m) => m.content).join("\n")).toContain("Your appointment is at 4pm");
+  });
+
+  it("does not turn quoted words or command output into facts newly stated by the person", async () => {
+    const w = await world();
+    const user = await w.newUser();
+    const { addMessage } = await import("../src/core/users");
+    await addMessage(w.db, { userId: user.id, role: "user", kind: "command", content: "/memory", at: w.now });
+    await addMessage(w.db, { userId: user.id, role: "emi", kind: "command", content: "Lives in Paris", at: w.now });
+    await handleTurn(w.deps, user.id, [{ text: "what did you mean by that?", replyTo: { author: "other", text: "I am a doctor" } }]);
+    w.script = byModel({ utility: (messages) => {
+      expect(messages[1]!.content).not.toContain("Lives in Paris");
+      expect(messages[1]!.content).toContain("I am a doctor");
+      return JSON.stringify({ memories: [{ kind: "identity", content: "Is a doctor", evidence: "I am a doctor" }] });
+    } });
+    expect((await runExtraction(w.deps, user.id))?.memoriesAdded).toBe(0);
+    expect(await activeMemories(w.db, user.id)).toHaveLength(0);
+  });
+
+  it("does not pay for extraction when only commands and confirmations have been added", async () => {
+    const w = await world();
+    const user = await w.newUser();
+    const { addMessage } = await import("../src/core/users");
+    await addMessage(w.db, { userId: user.id, role: "user", kind: "command", content: "/timezone Europe/Moscow", at: w.now });
+    await addMessage(w.db, { userId: user.id, role: "emi", kind: "command", content: "so it's 15:00 for you. got it.", at: w.now });
+    await runExtraction(w.deps, user.id);
+    expect(w.calls).toHaveLength(0);
+    expect((await getUser(w.db, user.id))!.extractedThrough).toBeGreaterThan(0);
+  });
+});

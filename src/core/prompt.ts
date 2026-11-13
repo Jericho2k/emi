@@ -1,5 +1,6 @@
 import type { ChatMessage } from "../llm/provider";
 import { describeDay, describeGap, describeMoment, localParts } from "./clock";
+import { messageContent } from "./message";
 import type { Recall } from "./memory/recall";
 import { BUBBLE_SEPARATOR, PERSONA } from "./persona";
 import type { AgendaItem, Memory, StoredMessage, User } from "./types";
@@ -46,7 +47,7 @@ export function renderHistory(history: StoredMessage[], tz: string): ChatMessage
   const out: ChatMessage[] = [];
   let previous: Date | null = null;
   for (const message of history) {
-    let content = message.content;
+    let content = messageContent(message);
     if (message.role === "user") {
       const newDay = !previous || localParts(previous, tz).dateKey !== localParts(message.createdAt, tz).dateKey;
       const longGap = previous && message.createdAt.getTime() - previous.getTime() > 3_600_000;
@@ -80,6 +81,7 @@ export interface TurnContext {
   turnKind: TurnKind;
   /** When they last wrote before this message. */
   previousUserAt: Date | null;
+  hasPriorConversation?: boolean;
 }
 
 /** The notes that change every turn. They go last so everything above stays cacheable. */
@@ -91,7 +93,7 @@ export function contextBlock(context: TurnContext): string {
     ? `Now, where they are: ${describeMoment(now, user.timezone)}.`
     : `Now: ${describeMoment(now, "UTC")} UTC. You don't know where they are yet, so you can't be sure of their local time. If times, plans or reminders come up, ask what city they're in.`);
   if (previousUserAt) lines.push(`Their previous message was ${describeGap(now.getTime() - previousUserAt.getTime())} ago.`);
-  else lines.push("This is the first time they've written to you.");
+  else if (!context.hasPriorConversation) lines.push("This is the first time they've written to you.");
   if (user.displayName) lines.push(`They go by ${user.displayName}.`);
 
   const moodAt = user.mood.at ? new Date(user.mood.at).getTime() : 0;

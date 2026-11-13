@@ -69,11 +69,24 @@ export interface AgendaItem {
   createdAt: Date;
 }
 
+/** A snapshot of what someone replied to, independent of the chat channel. */
+export interface ReplyContext {
+  author: "emi" | "user" | "other";
+  text?: string;
+  quote?: string;
+}
+
+export interface IncomingMessage {
+  text: string;
+  replyTo?: ReplyContext;
+}
+
 export interface StoredMessage {
   id: number;
   role: "user" | "emi";
   content: string;
-  kind: "reply" | "proactive";
+  kind: "reply" | "proactive" | "command";
+  replyTo?: ReplyContext;
   agendaItemId: string | null;
   createdAt: Date;
 }
