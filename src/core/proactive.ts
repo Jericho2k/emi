@@ -1,11 +1,12 @@
 import { z } from "zod";
-import { parseJsonObject, type ChatMessage } from "../llm/provider";
+import { LlmResponseError, parseJsonObject, type ChatMessage } from "../llm/provider";
 import { DAILY_PING_BUDGET, SILENCE_HOURS } from "./agenda/policy";
 import { claimDuePings, expireStale, hasOpenInitiative, setPing, setStatus, upsertAgendaItem } from "./agenda/store";
 import { describeMoment, inQuietHours, localParts, localToUtc, nextAwake } from "./clock";
 import { runExtraction } from "./extraction";
 import { activeMemories } from "./memory/store";
 import { messageContent } from "./message";
+import { webContext } from "./web";
 import { PERSONA } from "./persona";
 import { joinBubbles, parseReply, renderHistory } from "./prompt";
 import type { AgendaItem, Deps, Outbound, User } from "./types";
@@ -59,7 +60,7 @@ async function compose(deps: Deps, user: User, item: AgendaItem, now: Date): Pro
       "Read the conversation above first. If they already told you how this went, if the conversation has moved somewhere this would be intrusive, or if it simply no longer makes sense, reply with exactly HOLD.",
       "Otherwise write what you'd text: short, specific to them, no greeting formula, no \"just checking in\", nothing about remembering, notes or schedules.",
     ].filter(Boolean).join("\n");
-  const messages: ChatMessage[] = [{ role: "system", content: PERSONA }, ...renderHistory(await recentMessages(deps.db, user.id, 20), user.timezone)];
+  const messages: ChatMessage[] = [{ role: "system", content: `${PERSONA}\n\n${webContext(false)}` }, ...renderHistory(await recentMessages(deps.db, user.id, 20), user.timezone)];
   const final = `<notes>\nPrivate notes for you. They cannot see these.\nNow, where they are: ${describeMoment(now, user.timezone)}.\n${notes}\n</notes>`;
   const last = messages[messages.length - 1];
   if (last?.role === "user") last.content += `\n${final}`;
@@ -72,6 +73,7 @@ async function compose(deps: Deps, user: User, item: AgendaItem, now: Date): Pro
     const { bubbles } = parseReply(reply.text, "social");
     return bubbles.length ? bubbles : null;
   } catch (error) {
+    if (error instanceof LlmResponseError) await recordUsage(deps.db, user.id, "proactive_failed", error.usage, now);
     console.warn("[proactive] compose failed", error instanceof Error ? error.message : error);
     // A reminder is a promise, so it goes out even when the model does not.
     return item.kind === "reminder" ? [`Reminder: ${item.about}`] : null;
@@ -148,6 +150,7 @@ export async function runDailyPlanner(deps: Deps): Promise<number> {
     try {
       if (await planFor(deps, user, now)) planned += 1;
     } catch (error) {
+      if (error instanceof LlmResponseError) await recordUsage(deps.db, user.id, "planner_failed", error.usage, now);
       console.warn("[planner] failed", user.id, error instanceof Error ? error.message : error);
     }
   }

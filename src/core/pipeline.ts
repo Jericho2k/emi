@@ -1,16 +1,18 @@
+import { LlmResponseError } from "../llm/provider";
 import { ProviderError } from "../llm/openrouter";
 import { absorbOnUserMessage, openForWeave, setStatus } from "./agenda/store";
 import { recall } from "./memory/recall";
 import { agendaLabel, buildTurnMessages, classifyTurn, historyWindow, joinBubbles, parseReply, type TurnKind } from "./prompt";
 import { messageContent } from "./message";
 import type { Deps, IncomingMessage } from "./types";
+import { attachSources, webContext } from "./web";
 import { addMessage, getUser, messageCount, recentMessages, recordUsage } from "./users";
 
 export interface TurnResult {
   bubbles: string[];
   turnKind: TurnKind;
   /** Set when no reply could be written; `bubbles` then holds a plain notice. */
-  problem?: "no_key" | "key_rejected";
+  problem?: "no_key" | "key_rejected" | "model_unavailable";
   /** Memories used this turn, handed to the extractor so it can spot replacements. */
   recalledIds: string[];
 }
@@ -27,8 +29,8 @@ const SETTINGS: Record<TurnKind, { temperature: number; maxTokens: number }> = {
 /**
  * One message from the person in, one reply out.
  *
- * Exactly one model call sits on this path (plus one small embedding). Every
- * other piece of thinking, extraction included, happens after the reply.
+ * The writer may use bounded read-only web tools; the provider handles their
+ * execution. Memory extraction still happens after the reply.
  */
 export async function handleTurn(deps: Deps, userId: string, input: string | IncomingMessage[]): Promise<TurnResult> {
   const incoming = typeof input === "string" ? [{ text: input }] : input;
@@ -70,10 +72,22 @@ export async function handleTurn(deps: Deps, userId: string, input: string | Inc
     user, now, recall: recalled, weave, turnKind, previousUserAt,
     hasPriorConversation: history.length > 0 || incoming.some((message) => !!message.replyTo),
   }, history, content);
+  messages[0]!.content += `\n\n${webContext(!!llm.capabilities?.web)}`;
   let reply;
   try {
-    reply = await llm.chat(messages, { model: deps.models.writer, ...SETTINGS[turnKind] });
+    reply = await llm.chat(messages, { model: deps.models.writer, ...SETTINGS[turnKind], web: !!llm.capabilities?.web });
   } catch (error) {
+    if (error instanceof LlmResponseError) {
+      await recordUsage(db, userId, "reply_failed", error.usage, now);
+      console.warn("[reply]", error.message);
+      const notice = error.kind === "web_unavailable"
+        ? "my web request was rejected. the OpenRouter model or tool permissions need checking; I couldn't verify that online."
+        : error.kind === "request_failed"
+          ? "the request failed while I was trying again. try that in a moment."
+          : "my model didn't give me a usable answer. try that again in a moment.";
+      await addMessage(db, { userId, role: "emi", content: notice, kind: "command", at: deps.clock() });
+      return { bubbles: [notice], turnKind, problem: "model_unavailable", recalledIds: [] };
+    }
     if (error instanceof ProviderError && error.isKeyProblem) {
       return { bubbles: [KEY_REJECTED], turnKind, problem: "key_rejected", recalledIds: [] };
     }
@@ -82,7 +96,7 @@ export async function handleTurn(deps: Deps, userId: string, input: string | Inc
   await recordUsage(db, userId, "reply", reply.usage, now);
 
   const parsed = parseReply(reply.text, turnKind);
-  const bubbles = parsed.bubbles.length ? parsed.bubbles : [reply.text.trim()];
+  const bubbles = attachSources(parsed.bubbles.length ? parsed.bubbles : [reply.text.trim()], reply.citations);
   for (const [index, item] of weave.entries()) {
     if (parsed.used.includes(agendaLabel(index))) await setStatus(db, item.id, "woven", "brought up in conversation", now);
   }
