@@ -1,5 +1,6 @@
-import { Bot, type Context } from "grammy";
+import { Bot, InputFile, type Context } from "grammy";
 import type { Config } from "../config";
+import { exportAccount, wipeAccount } from "../core/account";
 import { pendingItems } from "../core/agenda/store";
 import { describeMoment, isValidTimeZone } from "../core/clock";
 import { runExtraction } from "../core/extraction";
@@ -26,6 +27,8 @@ const HELP = [
   "/timezone <Area/City> — where you are, e.g. Europe/Berlin",
   "/quiet <from> <to> — hours I stay silent, e.g. /quiet 23 8",
   "/usage — what today has cost, and /cap <usd> to change the limit on what I spend unasked",
+  "/export — a file with everything I hold about you",
+  "/wipe — erase our whole conversation and everything I remember",
 ].join("\n");
 
 export function createTelegram(deps: Deps, config: Config): { bot: Bot; outbound: Outbound } {
@@ -189,6 +192,20 @@ export function createTelegram(deps: Deps, config: Config): { bot: Bot; outbound
     if (!Number.isFinite(value) || value < 0 || value > 100) return reply("send a number in dollars, e.g. /cap 0.5");
     await updateUser(deps.db, user.id, { dailyCapUsd: value });
     return reply(`cap set to $${value.toFixed(2)} a day.`);
+  });
+
+  command("export", async (ctx, user, _arg, reply) => {
+    const data = await exportAccount(deps.db, user.id, deps.clock());
+    await ctx.replyWithDocument(new InputFile(Buffer.from(JSON.stringify(data, null, 2)), "emi-export.json"));
+    return reply("that's everything: messages, memories, plans and settings. your API key is not in it.");
+  });
+
+  command("wipe", async (_ctx, user, arg, reply) => {
+    if (arg.toLowerCase() !== "yes") {
+      return reply("this erases our whole conversation and everything i remember about you. it can't be undone. /export first if you want a copy, then send /wipe yes.");
+    }
+    await wipeAccount(deps.db, user.id);
+    return reply("done. everything is erased. your settings and key are still here, so you can just start talking again.");
   });
 
   // ---- conversation ----

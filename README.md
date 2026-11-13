@@ -67,6 +67,8 @@ The key is read from the environment only. Never put it in a file in this reposi
 | `/timezone <Area/City>` | Where you are. Telling her your city in chat works too. |
 | `/quiet <from> <to>` | Hours she stays silent. |
 | `/usage`, `/cap <usd>` | Today's cost, and the daily limit on what she spends unasked. |
+| `/export` | A JSON file with everything she holds: messages, memories, plans, timeline and settings. Never the API key. |
+| `/wipe yes` | Erases the whole conversation and everything learned from it. Settings and the key stay. |
 
 ## Telegram conversation context
 
@@ -185,9 +187,23 @@ Existing agenda rows are not deleted by this update and expire normally.
 
 If you write first, she raises a follow-up or initiative in that conversation, and its ping is cancelled. A ping needs several hours of silence, respects quiet hours and a daily budget, and is never sent while an earlier check-in is unanswered. The message is written at send time against the current conversation, and the writer may decide to hold it. Three brush-offs in a row lower her initiative one step.
 
+**Long history** (`src/core/memory/timeline.ts`). The writer sees the newest 30 to 49 messages in full. When a block of 20 leaves that window, one cheap call writes an arc for exactly those messages: a chapter summary and a one-line headline. The newest arcs appear as headlines; a run of six arcs is folded once into a chapter, and a run of six chapters once into a part. Nothing folded is summarised again, so the order of events cannot drift, and the record grows only logarithmically with the length of the chat. It sits right after the persona in the prompt and changes only when a block is consolidated. When a turn is about an old chapter, that chapter's full summary is added to the turn's notes.
+
+One limit to know: `/forget` erases a memory, but a chapter summary written earlier may still mention the same fact. `/wipe` erases everything.
+
+## Deploy on Railway
+
+Emi is a worker: she polls Telegram and runs a scheduler, and serves no HTTP. The repository has a `Dockerfile` and a `railway.toml`.
+
+1. In Railway, create a project from this GitHub repository and pick the branch to deploy.
+2. Under Variables, add `TELEGRAM_BOT_TOKEN`, `DATABASE_URL` and `EMI_MASTER_KEY`, plus any optional ones from `.env.example`. Use the same `EMI_MASTER_KEY` you used before, or keys stored with `/key` can no longer be read.
+3. For `DATABASE_URL` with Supabase, use the session pooler connection string (the host ending in `pooler.supabase.com`). Railway has no outbound IPv6, and Supabase's direct connection is IPv6 only.
+4. Deploy. The log should show `[emi] running`. Migrations are applied on start.
+
+Run exactly one instance. Stop any copy on your own machine first: two processes polling the same bot each receive only some of the messages, and Telegram answers one of them with a 409 conflict.
+
 ## Not built yet
 
-- Long-history consolidation (the folded timeline). History beyond the recent window is reachable only through extracted memories.
 - A web page for memory; `/memory` and `/forget` cover it in chat for now.
 - Voice, images and files.
 - Streaming replies.
