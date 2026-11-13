@@ -10,17 +10,35 @@ export interface Usage {
   costUsd: number;
 }
 
+export interface Citation {
+  url: string;
+  title: string;
+}
+
+/** Carries billed usage even when the provider never produced a usable answer. */
+export class LlmResponseError extends Error {
+  readonly kind: "unusable" | "request_failed" | "web_unavailable";
+  constructor(message: string, public readonly usage: Usage, options?: ErrorOptions & { kind?: LlmResponseError["kind"] }) {
+    super(message, options);
+    this.kind = options?.kind ?? "unusable";
+    this.name = "LlmResponseError";
+  }
+}
+
 export interface ChatOptions {
   model: string;
   temperature?: number;
   maxTokens?: number;
   /** Ask the provider for a JSON object. */
   json?: boolean;
+  /** Allow read-only web tools for this user-requested reply. */
+  web?: boolean;
 }
 
 /** The whole model surface the core depends on. */
 export interface Llm {
-  chat(messages: ChatMessage[], options: ChatOptions): Promise<{ text: string; usage: Usage }>;
+  readonly capabilities?: { web: boolean };
+  chat(messages: ChatMessage[], options: ChatOptions): Promise<{ text: string; usage: Usage; citations?: Citation[] }>;
   embed(texts: string[], model: string): Promise<{ vectors: number[][]; usage: Usage }>;
 }
 

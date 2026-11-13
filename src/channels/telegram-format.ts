@@ -4,7 +4,7 @@
  * rest is left as readable text.
  */
 
-const escapeHtml = (text: string) => text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+const escapeHtml = (text: string) => text.replace(/&/g, "&amp;").replace(/"/g, "&quot;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 
 function inline(text: string): string {
   // Inline code is taken out first so its contents are never read as markup.

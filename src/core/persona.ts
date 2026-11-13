@@ -38,6 +38,6 @@ The date and time in the notes is the truth about now. Messages in the history c
 Sometimes the notes list something you wanted to ask about, each with a short id. First deal with what they actually wrote. Then, only if it fits the moment, bring up at most one, casually, the way you'd ask a friend. If they are stressed, busy, or the conversation is about something heavy, leave it. If you do bring one up, add a final line containing only <<used:ID>> with its id. That line is removed before they see it.
 
 # Limits
-You can't browse the web, set alarms outside this chat, or act in the world unless a tool for it exists. If they ask you to remind them of something at a time, say you will: reminders are handled for you. If they ask for something you can't do, say so plainly and help with the part you can.`;
+Your available tools are described in the turn context. Use only tools actually available; you cannot set alarms outside this chat or act in the world without a tool for it. If they ask you to remind them of something at a time, say you will: reminders are handled for you. If they ask for something you can't do, say so plainly and help with the part you can.`;
 
 export const MOOD_LABELS = ["neutral", "cheerful", "playful", "tender", "tired", "worried", "annoyed", "proud", "curious", "low"] as const;

@@ -1,5 +1,6 @@
 import { z } from "zod";
-import { parseJsonObject } from "../llm/provider";
+import type { Db } from "../db";
+import { LlmResponseError, parseJsonObject } from "../llm/provider";
 import { planWindows } from "./agenda/policy";
 import { awaitingReaction, pendingItems, setStatus, upsertAgendaItem } from "./agenda/store";
 import { describeMoment, hasTimeOfDay, isValidTimeZone, localParts, localToUtc } from "./clock";
@@ -37,7 +38,7 @@ Return one JSON object with these fields:
    "supersedes": the id (like "m3") of a listed memory this replaces because it changed, else null,
    "storyline": a short lowercase tag if it belongs to an ongoing thread in their life ("job search"), else null}
   identity = who they are (name, job, city). boundary = something they asked Emi to do or never do. relationship = people in their life. preference = lasting likes and dislikes. state = an ongoing situation that can change (looking for a job, training for a race). event = something that happened on a particular day.
-  Only what they stated. No guesses, nothing Emi said, no one-off questions they asked, no passwords, keys, card numbers or addresses. Do not repeat a memory that is already listed.
+  Only what they stated. Temporary command probes and integration-test exchanges are not durable personal facts. No guesses, nothing Emi said, no one-off questions they asked, no passwords, keys, card numbers or addresses. Do not repeat a memory that is already listed.
 
 "agenda": things in THEIR FUTURE that Emi should come back to. Each:
   {"kind": "reminder" | "followup",
@@ -47,7 +48,8 @@ Return one JSON object with these fields:
    "when": "YYYY-MM-DDTHH:mm" or "YYYY-MM-DD" in THEIR local time, or null if they gave no day,
    "evidence": an EXACT quote from their message,
    "closes_when": what would make this settled}
-  reminder = they explicitly asked to be reminded or told at a time; "when" must include the time. followup = something coming up (an interview, a trip, a doctor's visit) that a friend would ask about afterwards; "when" is when THEIR event happens, never when Emi should write.
+  reminder = they explicitly asked to be reminded or told at a time; "when" must include the time. followup = a concrete event in their life outside this conversation (an interview, a trip, a doctor's visit) that a friend would ask about afterwards; "when" is when THEIR event happens, never when Emi should write.
+  Do not create follow-ups for immediate conversational steps, trying a command, debugging Emi, checking what she can see, or one-off questions/tasks. Explicit requests to be reminded are still reminders, even about a technical task. If a personal event has no stated day, keep an appropriate memory instead of guessing an agenda date.
   importance: 1 = idle curiosity, 2 = they care about it, 3 = it clearly matters a lot to them.
   Work out dates from the current date and time given. If the day is ambiguous, use null.
 
@@ -85,6 +87,9 @@ const list = <T>(schema: z.ZodType<T>, value: unknown, max: number): T[] =>
   (Array.isArray(value) ? value : []).map((item) => schema.safeParse(item)).flatMap((r) => (r.success ? [r.data] : [])).slice(0, max);
 
 const running = new Set<string>();
+// Failed extraction keeps its cursor, but a persistent provider outage must not
+// become a paid request every 30 seconds. Backoff is per database and person.
+const failures = new WeakMap<Db, Map<string, { count: number; retryAt: number }>>();
 const letters = (value: string) => (value.match(/\p{L}/gu) ?? []).length;
 
 export interface ExtractionSummary {
@@ -95,10 +100,12 @@ export interface ExtractionSummary {
 }
 
 export async function runExtraction(deps: Deps, userId: string, hint: { memoryIds?: string[] } = {}): Promise<ExtractionSummary | null> {
-  if (running.has(userId)) return null;
+  if (running.has(userId) || (failures.get(deps.db)?.get(userId)?.retryAt ?? 0) > deps.clock().getTime()) return null;
   running.add(userId);
   try {
-    return await extract(deps, userId, hint.memoryIds ?? []);
+    const summary = await extract(deps, userId, hint.memoryIds ?? []);
+    if (summary) failures.get(deps.db)?.delete(userId);
+    return summary;
   } finally {
     running.delete(userId);
   }
@@ -155,11 +162,19 @@ async function extract(deps: Deps, userId: string, hintIds: string[]): Promise<E
   try {
     const result = await llm.chat([{ role: "system", content: SYSTEM }, { role: "user", content: prompt }],
       { model: deps.models.utility, temperature: 0.2, maxTokens: 1500, json: true });
+    const parsed = parseJsonObject(result.text);
+    if (parsed === null) throw new LlmResponseError("Extraction returned invalid JSON", result.usage);
+    data = parsed as Record<string, unknown>;
     await recordUsage(db, userId, "extraction", result.usage, now);
-    data = (parseJsonObject(result.text) ?? {}) as Record<string, unknown>;
   } catch (error) {
-    console.warn("[extraction] model call failed", error instanceof Error ? error.message : error);
-    return null; // Retried by the next sweep.
+    if (error instanceof LlmResponseError) await recordUsage(db, userId, "extraction_failed", error.usage, now);
+    const state = failures.get(db) ?? new Map<string, { count: number; retryAt: number }>();
+    const count = (state.get(userId)?.count ?? 0) + 1;
+    const delay = Math.min(15 * 60_000, 30_000 * 2 ** Math.min(count, 5));
+    state.set(userId, { count, retryAt: now.getTime() + delay });
+    failures.set(db, state);
+    console.warn("[extraction] model call failed", error instanceof Error ? error.message : error, `retry_in_seconds=${delay / 1000}`);
+    return null; // Cursor stays unread; a later sweep retries after backoff.
   }
 
   // Where they are comes first: every time below is read in that timezone.
@@ -245,6 +260,9 @@ async function applyAgenda(
     const when = item.when && user.timezoneKnown ? item.when : null;
     if (item.kind === "reminder" && !when) continue;
     const eventAt = when ? localToUtc(when, user.timezone) : null;
+    // Undated chat steps are not durable future events. Do not manufacture a
+    // seven-day follow-up from "I'll try /agenda after this message".
+    if (item.kind === "followup" && !eventAt) continue;
     // Nothing is scheduled more than a year out on a model's say-so.
     if (eventAt && eventAt.getTime() > now.getTime() + 366 * 86_400_000) continue;
     const windows = planWindows({

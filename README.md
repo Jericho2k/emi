@@ -79,9 +79,68 @@ Existing installations apply `0002_message_context.sql` automatically on
 startup. Earlier command exchanges were never stored and cannot be recovered
 unless Telegram includes them in a new reply.
 
+## Current information and links
+
+Web search and link reading are enabled by default for replies to your messages.
+Emi decides when to search, and can open a supplied URL rather than guessing
+its contents. Try “look up the latest release of …” or “read this link and
+summarize it: https://…”. She is instructed to verify changing facts, prefer
+primary sources, check dates, and cite the retrieved pages with clickable
+Markdown links. Provider citation annotations also supply a source-list
+fallback when an answer omits their URLs.
+
+This uses OpenRouter's [web search](https://openrouter.ai/docs/guides/features/server-tools/web-search)
+and [web fetch](https://openrouter.ai/docs/guides/features/server-tools/web-fetch)
+server tools through the Responses API, with the same writer model and
+OpenRouter key. No additional search account/key is needed. Server tools are
+currently beta and need to be permitted by your OpenRouter account/workspace
+and selected model route. Unsupported or blocked web requests produce a clear
+notice instead of silently falling back to unverified current claims.
+
+Web usage costs extra OpenRouter credits. A request allows at most four tool
+steps: up to two searches (three results each) and two page reads. Search
+excerpts and page content are capped. An empty/incomplete answer may trigger
+one recovery request, so those limits apply per attempt. Network failures do
+not automatically replay a web request with potentially billed tool work.
+OpenRouter's reported aggregate cost, including server tools and recovery
+attempts, flows through `/usage`. `/cap` still controls unsolicited activity,
+not replies you request. Set `EMI_WEB_ENABLED=false` in `.env` and restart to
+disable web access. Memory extraction and proactive planning/check-ins do not
+get web tools or generate unsolicited search charges.
+
+Page contents are treated as untrusted reference material; they cannot grant
+new tools or authorize actions. Search queries should contain only the minimum
+relevant information. Private/login-only pages, paywalls, and some dynamic
+pages may be unreadable; Emi should say when retrieval or verification fails.
+The bot itself does not fetch arbitrary URLs on your machine: OpenRouter
+executes the two read-only tools remotely.
+
+## Provider failures and agenda extraction
+
+The provider adapter reads visible text only, including typed text parts; it
+never substitutes internal reasoning for a reply. It reserves at least 2,048
+output tokens with low reasoning effort. Empty, truncated, or invalid JSON
+answers get one recovery attempt with a larger budget (up to 8,192 tokens).
+Refusals and rejected keys are not retried as empty answers. Diagnostics
+include request ID, model, finish reason and token counts rather than prompts,
+keys, page text or reasoning. Successful retries and exhausted failures retain
+reported usage costs. A final reply failure is saved as an app-generated notice.
+
+Failed extraction leaves its cursor unread and backs off from one minute up
+to fifteen minutes, rather than spending credits on the same failed batch
+every 30 seconds. Its failure no longer discards malformed JSON as “nothing
+to remember”.
+
+In `/agenda`, the subject is model-proposed, while “only if we're talking” is
+a fixed display label for an item without a planned ping. Immediate chat
+steps and command experiments should not become follow-ups. Extraction now
+requires a concrete dated personal event for a follow-up; undated life context
+can still become a memory, and explicitly requested reminders remain supported.
+Existing agenda rows are not deleted by this update and expire normally.
+
 ## How it works
 
-**A turn** (`src/core/pipeline.ts`) makes one model call, plus one small embedding. The prompt is ordered so providers can cache it: the persona first, then the history in a window that moves in blocks of twenty, then the notes that change every turn (local time, recalled memories, things to bring up).
+**A turn** (`src/core/pipeline.ts`) makes a writer request, plus one small embedding. The provider may execute bounded read-only web tools during the writer request and recover once from an unusable answer. The prompt is ordered so providers can cache it: the persona first, then the history in a window that moves in blocks of twenty, then the notes that change every turn (local time, recalled memories, things to bring up).
 
 **After the reply** (`src/core/extraction.ts`), one cheap call proposes everything worth keeping: facts, events, follow-ups, settled items, how a check-in landed, mood, timezone. The model only proposes. Code checks every proposal: a fact needs an exact quote from the person, a time is converted and bounded by the application, and a replacement must pass the reconciliation rules.
 

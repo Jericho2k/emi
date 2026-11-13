@@ -9,6 +9,7 @@ const Env = z.object({
   DATABASE_URL: z.string().min(10),
   EMI_MASTER_KEY: z.string().min(40),
   EMI_SHARED_OPENROUTER_KEY: z.string().optional(),
+  EMI_WEB_ENABLED: z.enum(["true", "false"]).default("true"),
   EMI_ALLOWED_TELEGRAM_IDS: z.string().optional(),
   EMI_WRITER_MODEL: z.string().default("deepseek/deepseek-v4.1-flash"),
   EMI_UTILITY_MODEL: z.string().default("z-ai/glm-5.3-flash"),
@@ -22,6 +23,7 @@ export interface Config {
   sharedKey: string | null;
   allowedTelegramIds: Set<string> | null;
   models: Models;
+  webEnabled?: boolean;
 }
 
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
@@ -34,6 +36,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
   const ids = (e.EMI_ALLOWED_TELEGRAM_IDS ?? "").split(",").map((id) => id.trim()).filter(Boolean);
   return {
     telegramToken: e.TELEGRAM_BOT_TOKEN,
+    webEnabled: e.EMI_WEB_ENABLED === "true",
     databaseUrl: e.DATABASE_URL,
     masterKey: parseMasterKey(e.EMI_MASTER_KEY),
     sharedKey: e.EMI_SHARED_OPENROUTER_KEY?.trim() || null,
@@ -50,7 +53,7 @@ export function llmResolver(config: Config): (user: User) => Llm | null {
     if (!key) return null;
     let client = clients.get(key);
     if (!client) {
-      client = openRouter(key);
+      client = openRouter(key, { webEnabled: config.webEnabled });
       clients.set(key, client);
     }
     return client;
