@@ -156,6 +156,12 @@ export function parseReply(raw: string, turnKind: TurnKind): ParsedReply {
 
   const separator = new RegExp(`^\\s*${BUBBLE_SEPARATOR}\\s*$`, "m");
   const structured = /```|^\s*(?:[-*]|\d+\.)\s|^#{1,6}\s/m.test(text);
+  if (turnKind !== "task" && !structured && !separator.test(text)) {
+    // Two or three short paragraphs in a chat are the writer's own breaks,
+    // made with a blank line instead of the separator. Honour them.
+    const paragraphs = text.split(/\n\s*\n/).map((part) => part.trim()).filter(Boolean);
+    if (paragraphs.length > 1 && paragraphs.length <= MAX_BUBBLES && paragraphs.every((part) => part.length <= 240)) return { bubbles: paragraphs, used };
+  }
   if (turnKind === "task" || structured || !separator.test(text)) {
     // One message. A stray separator becomes a paragraph break.
     return { bubbles: [text.split(separator).map((part) => part.trim()).filter(Boolean).join("\n\n")].filter(Boolean), used };

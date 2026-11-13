@@ -20,11 +20,13 @@ export function attachSources(bubbles: string[], citations: Citation[] = []): st
       seen.add(url.href);
       const target = url.href.replace(/\(/g, "%28").replace(/\)/g, "%29");
       if (text.includes(url.href) || text.includes(target)) continue;
-      const title = citation.title.replace(/[\[\]`<>\r\n]/g, " ").trim().slice(0, 120) || url.hostname;
-      links.push(`[${title}](${target})`);
+      links.push(`[${url.hostname.replace(/^www\./, "")}](${target})`);
       if (links.length === 6) break;
     } catch { /* Invalid metadata is not a source. */ }
   }
-  if (!links.length || !bubbles.length) return bubbles;
-  return [...bubbles.slice(0, -1), `${bubbles.at(-1)}\n\nSources: ${links.join(" · ")}`];
+  // Sources follow a claim only when the reply did not already link its own.
+  // Site names, not page titles: a title of a page that was searched but not
+  // quoted reads as support for a claim it never made.
+  if (!links.length || !bubbles.length || /\]\(https?:\/\//.test(text)) return bubbles;
+  return [...bubbles.slice(0, -1), `${bubbles.at(-1)}\n\n${links.slice(0, 3).join(" · ")}`];
 }

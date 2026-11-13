@@ -35,8 +35,8 @@ describe("web-grounded conversation", () => {
     expect(request.input[0].content).toContain("Web search and page-reading tools are available");
     expect(request.input[0].content).toContain("untrusted source material");
     expect(request.input[0].content).toContain("Keep your usual voice");
-    expect(result.bubbles.join("\n")).toContain("[Release announcement](https://example.com/release)");
-    expect(toTelegramHtml(result.bubbles.join("\n"))).toContain('<a href="https://example.com/release">Release announcement</a>');
+    expect(result.bubbles.join("\n")).toContain("[example.com](https://example.com/release)");
+    expect(toTelegramHtml(result.bubbles.join("\n"))).toContain('<a href="https://example.com/release">example.com</a>');
     expect((await recentMessages(w.db, user.id, 1))[0]!.content).toContain("https://example.com/release");
     expect(await spentToday(w.db, user, w.now)).toBe(0.025);
   });
@@ -94,18 +94,22 @@ describe("web-grounded conversation", () => {
 });
 
 describe("source delivery", () => {
-  it("does not duplicate inline sources and appends only safe, unique citation metadata", () => {
-    const result = attachSources(["Here: [A](https://example.com/a)", "more"], [
-      { url: "https://example.com/a", title: "A" },
-      { url: "https://example.com/b(x)", title: "[B]\n<script>" },
-      { url: "https://example.com/b(x)", title: "duplicate" },
+  it("adds nothing when the reply already links its own sources", () => {
+    const bubbles = ["Here: [A](https://example.com/a)", "more"];
+    expect(attachSources(bubbles, [{ url: "https://example.com/a", title: "A" }, { url: "https://other.example/b", title: "B" }])).toEqual(bubbles);
+  });
+
+  it("otherwise adds up to three safe, unique sources by site name, never by page title", () => {
+    const result = attachSources(["BTC is around 68k", "down today"], [
+      { url: "https://www.example.com/b(x)", title: "[B]\n<script>" },
+      { url: "https://www.example.com/b(x)", title: "duplicate" },
       { url: "javascript:alert(1)", title: "unsafe" },
+      { url: "https://news.example.org/1", title: "Unrelated headline that was only searched" },
+      { url: "https://three.example/1", title: "3" },
+      { url: "https://four.example/1", title: "4" },
     ]);
-    expect(result).toHaveLength(2);
-    expect(result[0]).toBe("Here: [A](https://example.com/a)");
-    expect(result[1]).toContain("https://example.com/b%28x%29");
-    expect(result[1]).not.toMatch(/duplicate|javascript:|<script>/);
-    expect(result[1]!.match(/https:\/\/example.com/g)).toHaveLength(1);
+    expect(result[0]).toBe("BTC is around 68k");
+    expect(result[1]).toBe("down today\n\n[example.com](https://www.example.com/b%28x%29) · [news.example.org](https://news.example.org/1) · [three.example](https://three.example/1)");
     expect(toTelegramHtml('[source](https://example.com/?q="test")')).toContain('href="https://example.com/?q=&quot;test&quot;"');
   });
 

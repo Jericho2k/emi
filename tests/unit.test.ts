@@ -132,6 +132,9 @@ describe("prompt", () => {
     expect(parseReply("omg\n---\ntell me everything", "social").bubbles).toEqual(["omg", "tell me everything"]);
     expect(parseReply("a\n---\nb\n---\nc\n---\nd", "social").bubbles).toEqual(["a", "b", "c\nd"]);
     expect(parseReply("one thought", "social").bubbles).toEqual(["one thought"]);
+    // A blank line between short chat lines is the same choice, spelled differently.
+    expect(parseReply("yeah i've had it\n\nwhat should i look up?", "social").bubbles).toEqual(["yeah i've had it", "what should i look up?"]);
+    expect(parseReply(`${"long ".repeat(60)}\n\nsecond paragraph`, "mixed").bubbles).toHaveLength(1);
   });
   it("never splits a task answer or anything structured", () => {
     expect(parseReply("here\n---\n```js\nx\n```", "social").bubbles).toHaveLength(1);
