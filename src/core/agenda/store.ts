@@ -50,14 +50,20 @@ export async function pendingItems(db: Db, userId: string): Promise<AgendaItem[]
   return rows.map(agendaFromRow);
 }
 
+/** After being offered once, an item waits this long before it is offered again. */
+export const OFFER_COOLDOWN_MS = 12 * 3_600_000;
+
 /** What she may bring up in a conversation the person started. */
 export async function openForWeave(db: Db, userId: string, now: Date, limit = 3): Promise<AgendaItem[]> {
   const { rows } = await db.query<Row>(
     `select * from agenda_items where user_id = $1 and status = 'pending' and kind <> 'reminder'
         and window_start <= $2 and window_end >= $2
+        and (offered_at is null or offered_at < $4)
       order by importance desc, window_start asc limit $3`,
-    [userId, now, limit],
+    [userId, now, limit, new Date(now.getTime() - OFFER_COOLDOWN_MS)],
   );
+  // Whether or not she takes one up, they are not offered again this conversation.
+  if (rows.length) await db.query("update agenda_items set offered_at = $2 where id = any($1::uuid[])", [rows.map((row) => row.id), now]);
   return rows.map(agendaFromRow);
 }
 

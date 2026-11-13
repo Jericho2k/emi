@@ -153,6 +153,19 @@ describe("bringing things up", () => {
     expect((await status(w.db, item.id)).status).toBe("pending"); // still there if they come back
   });
 
+  it("offers an item once per conversation, so an ignored question is not asked again", async () => {
+    const { w, user } = await withInterview();
+    w.advance(9 * HOUR);
+    w.script = () => "noted";
+    await handleTurn(w.deps, user.id, "ugh what a day");
+    await handleTurn(w.deps, user.id, "anyway");
+    const offered = w.calls.filter((call) => call.options.model === "writer").map((call) => call.messages.at(-1)!.content.includes("a1: job interview"));
+    expect(offered).toEqual([true, false]);
+    w.advance(13 * HOUR);
+    await handleTurn(w.deps, user.id, "morning");
+    expect(w.calls.at(-1)!.messages.at(-1)!.content).toContain("a1: job interview");
+  });
+
   it("closes the item when they tell her how it went on their own", async () => {
     const { w, user, item } = await withInterview();
     w.advance(9 * HOUR);

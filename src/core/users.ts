@@ -29,6 +29,7 @@ export function userFromRow(row: Row): User {
     lastUserMessageAt: toDate(row.last_user_message_at),
     lastEmiMessageAt: toDate(row.last_emi_message_at),
     extractedThrough: Number(row.extracted_through),
+    consolidatedThrough: Number(row.consolidated_through ?? 0),
     lastPlannedOn: dateKey(row.last_planned_on),
     createdAt: toDate(row.created_at)!,
   };
@@ -70,7 +71,7 @@ const SETTABLE: Record<string, string> = {
   initiative: "initiative", brushoffCount: "brushoff_count", quietStart: "quiet_start",
   quietEnd: "quiet_end", dailyCapUsd: "daily_cap_usd", encryptedApiKey: "encrypted_api_key",
   lastUserMessageAt: "last_user_message_at", lastEmiMessageAt: "last_emi_message_at",
-  extractedThrough: "extracted_through", lastPlannedOn: "last_planned_on",
+  extractedThrough: "extracted_through", consolidatedThrough: "consolidated_through", lastPlannedOn: "last_planned_on",
 };
 
 export async function updateUser(db: Db, id: string, patch: Partial<Omit<User, "id" | "mood" | "createdAt">> & { mood?: Mood }): Promise<void> {

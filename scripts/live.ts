@@ -10,6 +10,7 @@
  *   +3h / +2d / +30m   move the clock forward and let her act (pings, planner)
  *   /memory            what she has stored
  *   /agenda            what she plans to bring up
+ *   /timeline          the long-history record
  *   /usage             what this run has cost
  * In a scenario file, lines starting with # are comments.
  */
@@ -21,6 +22,7 @@ import { pendingItems } from "../src/core/agenda/store";
 import { describeMoment } from "../src/core/clock";
 import { runExtraction } from "../src/core/extraction";
 import { activeMemories } from "../src/core/memory/store";
+import { runConsolidation, timelineFor } from "../src/core/memory/timeline";
 import { handleTurn } from "../src/core/pipeline";
 import { tick } from "../src/core/proactive";
 import type { Deps } from "../src/core/types";
@@ -70,6 +72,8 @@ async function handle(line: string): Promise<void> {
   } else if (line === "/memory") {
     const memories = await activeMemories(db, userId);
     console.log(memories.length ? memories.map((m) => `  [${m.kind}${m.occurredOn ? ` ${m.occurredOn}` : ""}] ${m.content}`).join("\n") : "  (no memories)");
+  } else if (line === "/timeline") {
+    console.log((await timelineFor(db, user)) || "  (no timeline yet)");
   } else if (line === "/agenda") {
     const items = await pendingItems(db, userId);
     console.log(items.length ? items.map((i) => `  [${i.kind} !${i.importance}] ${i.about} · from ${describeMoment(i.windowStart, tz)} · ping ${i.pingAt ? describeMoment(i.pingAt, tz) : "never"}`).join("\n") : "  (nothing planned)");
@@ -84,6 +88,8 @@ async function handle(line: string): Promise<void> {
     if (!result.problem) {
       const summary = await runExtraction(deps, userId, { memoryIds: result.recalledIds });
       if (summary && Object.values(summary).some(Boolean)) console.log(`  (kept: ${JSON.stringify(summary)})`);
+      const consolidated = await runConsolidation(deps, userId);
+      if (consolidated?.arcs) console.log(`  (timeline: +${consolidated.arcs} arc, ${consolidated.folds} folds)`);
     }
   }
 }

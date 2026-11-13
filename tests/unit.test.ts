@@ -5,7 +5,7 @@ import { inQuietHours, localDaysBetween, localParts, localToUtc, nextAwake } fro
 import { decryptKey, encryptKey } from "../src/core/keys";
 import { admit } from "../src/core/memory/recall";
 import { decide, evidenceIsExact, looksSensitive, type Candidate } from "../src/core/memory/reconcile";
-import { classifyTurn, historyWindow, parseReply, renderHistory } from "../src/core/prompt";
+import { classifyTurn, historyWindow, parseReply, renderHistory, replyHabits } from "../src/core/prompt";
 import { lowerInitiative } from "../src/core/users";
 import type { Memory, StoredMessage } from "../src/core/types";
 
@@ -143,6 +143,14 @@ describe("prompt", () => {
   it("strips the used tag, stray notes tags and an imitated timestamp", () => {
     const parsed = parseReply("[Fri 13 Nov 2026, 22:04]\nhow did the interview go?\n<<used:a1>>", "social");
     expect(parsed).toEqual({ bubbles: ["how did the interview go?"], used: ["a1"] });
+  });
+  it("names a reply habit only once it has formed", () => {
+    const reply = (content: string, id: number): StoredMessage => ({ id, role: "emi", kind: "reply", content, agendaItemId: null, createdAt: now });
+    expect(replyHabits([reply("one\n---\ntwo?", 1), reply("just one", 2)])).toEqual([]);
+    const habits = replyHabits([reply("a\n---\nb?", 1), reply("c\n---\nd?", 2)]);
+    expect(habits).toHaveLength(2);
+    expect(habits[0]).toContain("single short message");
+    expect(habits[1]).toContain("Don't ask one this time");
   });
   it("moves the history window in blocks so the prompt prefix stays stable", () => {
     expect(historyWindow(10)).toBe(10);

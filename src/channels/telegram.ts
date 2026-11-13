@@ -4,6 +4,7 @@ import { pendingItems } from "../core/agenda/store";
 import { describeMoment, isValidTimeZone } from "../core/clock";
 import { runExtraction } from "../core/extraction";
 import { encryptKey } from "../core/keys";
+import { runConsolidation } from "../core/memory/timeline";
 import { activeMemories, deleteMemory, findByShortId, insertMemory } from "../core/memory/store";
 import { handleTurn } from "../core/pipeline";
 import { INITIATIVE_LEVELS, type Deps, type Initiative, type IncomingMessage, type Outbound, type User } from "../core/types";
@@ -199,7 +200,11 @@ export function createTelegram(deps: Deps, config: Config): { bot: Bot; outbound
       const result = await handleTurn(deps, userId, messages);
       clearInterval(typing);
       await sendBubbles(chatId, result.bubbles);
-      if (!result.problem) void runExtraction(deps, userId, { memoryIds: result.recalledIds }).catch((error) => console.warn("[extraction]", error));
+      if (!result.problem) {
+        void runExtraction(deps, userId, { memoryIds: result.recalledIds })
+          .then(() => runConsolidation(deps, userId))
+          .catch((error) => console.warn("[background]", error));
+      }
     } catch (error) {
       console.error("[turn] failed", error);
       await bot.api.sendMessage(chatId, "something broke on my side. try that again in a moment.").catch(() => undefined);

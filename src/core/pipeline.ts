@@ -2,6 +2,7 @@ import { LlmResponseError } from "../llm/provider";
 import { ProviderError } from "../llm/openrouter";
 import { absorbOnUserMessage, openForWeave, setStatus } from "./agenda/store";
 import { recall } from "./memory/recall";
+import { timelineFor } from "./memory/timeline";
 import { agendaLabel, buildTurnMessages, classifyTurn, historyWindow, joinBubbles, parseReply, type TurnKind } from "./prompt";
 import { messageContent } from "./message";
 import type { Deps, IncomingMessage } from "./types";
@@ -69,7 +70,7 @@ export async function handleTurn(deps: Deps, userId: string, input: string | Inc
   const recalled = await recall(db, userId, text, queryVector, now);
 
   const messages = buildTurnMessages({
-    user, now, recall: recalled, weave, turnKind, previousUserAt,
+    user, now, recall: recalled, weave, turnKind, previousUserAt, timeline: await timelineFor(db, user),
     hasPriorConversation: history.length > 0 || incoming.some((message) => !!message.replyTo),
   }, history, content);
   messages[0]!.content += `\n\n${webContext(!!llm.capabilities?.web)}`;

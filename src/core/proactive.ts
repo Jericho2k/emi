@@ -5,6 +5,7 @@ import { claimDuePings, expireStale, hasOpenInitiative, setPing, setStatus, upse
 import { describeGap, describeMoment, inQuietHours, localParts, localToUtc, nextAwake } from "./clock";
 import { runExtraction } from "./extraction";
 import { activeMemories } from "./memory/store";
+import { sweepConsolidation } from "./memory/timeline";
 import { messageContent } from "./message";
 import { webContext } from "./web";
 import { PERSONA } from "./persona";
@@ -233,4 +234,5 @@ export async function tick(deps: Deps, outbound: Outbound): Promise<void> {
   await runDuePings(deps, outbound);
   await runDailyPlanner(deps);
   await sweepExtraction(deps);
+  await sweepConsolidation(deps);
 }
