@@ -26,13 +26,13 @@ import { getUser, lowerInitiative, messagesAfter, recordUsage, updateUser } from
 
 const SYSTEM = `You maintain the memory of Emi, a companion and assistant who talks with one person in a single ongoing chat. You read the newest messages and report, as JSON, what is worth keeping. You never write to the person.
 
-Most messages contain nothing worth keeping. Empty lists are the normal answer.
+Small talk, reactions and one-off questions contain nothing worth keeping, and for those empty lists are the right answer. But when they tell you something about their life, keep it with its concrete details: amounts and prices, dates and durations, names of people, pets and places, who offered or decided what. "The surgery costs 1800 euros" and "their sister Anna offered to lend half" are each worth a memory; a friend who forgot the figure a week later was not listening.
 
 Return one JSON object with these fields:
 
 "memories": durable things THE PERSON said about themselves or their life. Each:
   {"kind": "identity" | "boundary" | "relationship" | "preference" | "state" | "event",
-   "content": one plain sentence in third person, in the language they used,
+   "content": one plain sentence that stands on its own, in the language they used, with the concrete details kept. Refer to the person as "they"; never write their own name as the subject,
    "evidence": an EXACT quote copied from one of their messages,
    "occurred_on": "YYYY-MM-DD" for an event when the day is clear, else null,
    "supersedes": the id (like "m3") of a listed memory this replaces because it changed, else null,

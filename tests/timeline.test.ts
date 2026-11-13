@@ -37,7 +37,7 @@ describe("timeline view", () => {
   it("shows folded entries first and only the arcs beyond them, oldest first", () => {
     const entries: TimelineEntry[] = [{ level: 1, startMessageId: 1, endMessageId: 120, startedAt: at(1), endedAt: at(6), summary: "chapter one" }];
     const lines = timelineView(entries, [1, 2, 3, 4, 5, 6, 7, 8].map(arc));
-    expect(lines.map((line) => line.text)).toEqual(["chapter one", "headline 7", "headline 8"]);
+    expect(lines.map((line) => line.text)).toEqual(["chapter one", "summary 7", "summary 8"]);
   });
   it("lets a higher level hide the levels it covers", () => {
     const entries: TimelineEntry[] = [
@@ -45,7 +45,7 @@ describe("timeline view", () => {
       { level: 1, startMessageId: 1, endMessageId: 60, startedAt: at(1), endedAt: at(3), summary: "old chapter" },
       { level: 1, startMessageId: 121, endMessageId: 140, startedAt: at(7), endedAt: at(7), summary: "new chapter" },
     ];
-    expect(timelineView(entries, [7, 8].map(arc)).map((line) => line.text)).toEqual(["part one", "new chapter", "headline 8"]);
+    expect(timelineView(entries, [7, 8].map(arc)).map((line) => line.text)).toEqual(["part one", "new chapter", "summary 8"]);
   });
 });
 
@@ -73,10 +73,10 @@ describe("consolidation", () => {
     expect((await getUser(w.db, user.id))!.consolidatedThrough).toBe(20);
     expect(await runConsolidation(w.deps, user.id)).toEqual({ arcs: 0, folds: 0 });
     expect(seen.arcs).toHaveLength(1);
-    expect(await timelineFor(w.db, (await getUser(w.db, user.id))!)).toContain("] headline 1");
+    expect(await timelineFor(w.db, (await getUser(w.db, user.id))!)).toContain("] They talked about marathon at length.");
   });
 
-  it("gives the writer the timeline, and the full chapter when the turn is about it", async () => {
+  it("gives the writer the timeline with recent chapters in full", async () => {
     const w = await world();
     const user = await w.newUser();
     scribe(w);
@@ -87,8 +87,8 @@ describe("consolidation", () => {
     await handleTurn(w.deps, user.id, "thinking about the marathon again, we talked about it at length");
     const [system, ...rest] = w.calls[0]!.messages;
     expect(system!.content).toContain("# Your history together");
-    expect(system!.content).toContain("headline 1");
-    expect(rest.at(-1)!.content).toContain("They talked about marathon at length.");
+    expect(system!.content).toContain("They talked about marathon at length.");
+    expect(rest.at(-1)!.content).not.toContain("They talked about marathon at length."); // in the timeline already, not repeated in the notes
     // The summarised messages themselves are no longer sent.
     expect(rest.map((m) => m.content).join("\n")).not.toContain("marathon message 3");
   });
@@ -106,7 +106,7 @@ describe("consolidation", () => {
     expect(seen.folds).toHaveLength(1);
     expect(seen.folds[0]!.split("\n")).toHaveLength(6);
     const timeline = await timelineFor(w.db, (await getUser(w.db, user.id))!);
-    expect(timeline.split("\n").slice(2).map((line) => line.replace(/^- \[[^\]]+\] /, ""))).toEqual(["folded 1", "headline 7", "headline 8"]);
+    expect(timeline.split("\n").slice(2).map((line) => line.replace(/^- \[[^\]]+\] /, ""))).toEqual(["folded 1", "They talked about topic5 at length.", "They talked about topic6 at length."]);
     // Six more arcs fold the next run; the first fold is not touched again.
     for (let block = 9; block <= 14; block += 1) {
       await chat(w, user.id, `topic${block}`);
@@ -114,6 +114,14 @@ describe("consolidation", () => {
     }
     expect(seen.folds).toHaveLength(2);
     expect(seen.folds[1]).not.toContain("folded 1");
+
+    // A chapter that was folded away comes back in full when the turn is about it.
+    w.calls.length = 0;
+    await handleTurn(w.deps, user.id, "remember topic2? we talked about it at length");
+    const messages = w.calls[0]!.messages;
+    expect(messages[0]!.content).not.toContain("They talked about topic2 at length.");
+    expect(messages.at(-1)!.content).toContain("From your earlier conversations, in more detail");
+    expect(messages.at(-1)!.content).toContain("They talked about topic2 at length.");
   });
 
   it("leaves the history unread when the model fails, and backs off", async () => {

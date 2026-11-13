@@ -14,7 +14,7 @@ import { getUser, messageCount, recordUsage, updateUser } from "../users";
  * short chapter summary and a one-line headline. The timeline is built from
  * those:
  *
- *   newest arcs        shown as their headline, one line each
+ *   newest arcs        shown in full, a short paragraph each
  *   a run of arcs      folded ONCE into a level 1 chapter
  *   a run of chapters  folded ONCE into a level 2 part, and so on
  *
@@ -87,7 +87,9 @@ export function timelineView(entries: TimelineEntry[], arcs: Arc[]): TimelineLin
   }
   for (const arc of [...arcs].sort(byEnd)) {
     if (arc.endMessageId <= covered) continue;
-    lines.push({ ...arc, level: 0, text: arc.headline });
+    // In full, not as its headline: a one-line headline drops the amounts,
+    // names and dates, and the recent past is where people ask for them.
+    lines.push({ ...arc, level: 0, text: arc.summary });
     covered = arc.endMessageId;
   }
   return lines;
@@ -129,11 +131,17 @@ export async function timelineFor(db: Db, user: User): Promise<string> {
   return renderTimeline(timelineView(await loadEntries(db, user.id), arcs), user.timezone);
 }
 
-/** Chapters from the past that the current message is about, in full. */
+/**
+ * Chapters that have been folded away, brought back in full because the
+ * current message is about them. Unfolded arcs are already in the timeline
+ * in full, so only folded ones are looked up.
+ */
 export async function relevantArcs(db: Db, userId: string, vector: number[], floor = 0.35, limit = 2): Promise<Arc[]> {
   const { rows } = await db.query<Row>(
     `select id, start_message_id, end_message_id, started_at, ended_at, headline, summary, 1 - (embedding <=> $2::vector) as similarity
-       from arcs where user_id = $1 and embedding is not null order by embedding <=> $2::vector limit $3`,
+       from arcs where user_id = $1 and embedding is not null
+        and end_message_id <= coalesce((select max(end_message_id) from timeline_entries where user_id = $1), 0)
+      order by embedding <=> $2::vector limit $3`,
     [userId, vectorLiteral(vector), limit],
   );
   return rows.filter((row) => Number(row.similarity) >= floor)
@@ -150,7 +158,7 @@ const ARC_SYSTEM = `You keep the long-term record of one ongoing chat between Em
 Return JSON: {"headline": "...", "summary": "..."}
 
 "headline": one sentence, at most 25 words, saying what this stretch was about.
-"summary": at most 120 words, past tense. What happened in their life and between the two of them, with the specifics that matter later: names, decisions, outcomes, how they felt about it. Where Emi helped with a task, say what the task was and how it ended in one clause; never reproduce the content (no code, no long answers, no lists).
+"summary": at most 120 words, past tense. What happened in their life and between the two of them. Keep every concrete fact exactly as stated: amounts and prices, dates and durations, names of people, pets and places, who offered or decided what, and how it turned out. These details are what they will ask about later, and a vague phrase like "discussed costs" loses them. Also say how they felt about it. Where Emi helped with a task, say what the task was and how it ended in one clause; never reproduce the content (no code, no long answers, no lists).
 
 Rules: only what the messages say, no speculation. No passwords, keys, card numbers or addresses. Refer to the person as "they" and to Emi by name. Write in the language the person mostly used.`;
 
