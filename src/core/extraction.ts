@@ -5,6 +5,7 @@ import { awaitingReaction, pendingItems, setStatus, upsertAgendaItem } from "./a
 import { describeMoment, hasTimeOfDay, isValidTimeZone, localParts, localToUtc } from "./clock";
 import { decide, evidenceIsExact, looksSensitive, type Candidate } from "./memory/reconcile";
 import { activeMemories, insertMemory, memoriesByIds, nearestMemories, supersedeMemory, type Neighbour } from "./memory/store";
+import { messageContent } from "./message";
 import { MOOD_LABELS } from "./persona";
 import { MEMORY_KINDS, type AgendaItem, type Deps, type Memory, type MemoryKind, type User } from "./types";
 import { getUser, lowerInitiative, messagesAfter, recordUsage, updateUser } from "./users";
@@ -110,7 +111,7 @@ async function extract(deps: Deps, userId: string, hintIds: string[]): Promise<E
   const batch = await messagesAfter(db, userId, user.extractedThrough);
   const last = batch[batch.length - 1];
   if (!last) return null;
-  const theirs = batch.filter((message) => message.role === "user");
+  const theirs = batch.filter((message) => message.role === "user" && message.kind !== "command");
   const source = theirs.map((message) => message.content).join("\n");
   const now = deps.clock();
   const summary: ExtractionSummary = { memoriesAdded: 0, memoriesSuperseded: 0, agendaCreated: 0, agendaClosed: 0 };
@@ -147,7 +148,7 @@ async function extract(deps: Deps, userId: string, hintIds: string[]): Promise<E
     ...(awaiting ? ["", `Emi recently checked in about: "${awaiting.about}". Report ping_reaction.`] : []),
     "",
     "Newest messages:",
-    ...batch.map((message) => `${message.role === "user" ? "THEM" : "EMI"}: ${message.content.slice(0, 1500)}`),
+    ...batch.filter((message) => message.kind !== "command").map((message) => `${message.role === "user" ? "THEM" : "EMI"}: ${messageContent(message).slice(0, 6000)}`),
   ].join("\n");
 
   let data: Record<string, unknown>;
