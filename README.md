@@ -38,6 +38,22 @@ npm test
 npm run typecheck
 ```
 
+## Try her in a terminal
+
+To talk to Emi with real models but no Telegram and no database, using a throwaway in-process Postgres:
+
+```bash
+OPENROUTER=sk-or-... npm run live
+```
+
+Type `+3h` or `+1d` to move the clock forward and let her act on her own, and `/memory`, `/agenda` or `/usage` to see her state. To replay a scripted conversation:
+
+```bash
+OPENROUTER=sk-or-... npm run live scripts/scenario.txt
+```
+
+The key is read from the environment only. Never put it in a file in this repository.
+
 ## What a person can control
 
 | Command | What it does |
