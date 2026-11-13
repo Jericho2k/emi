@@ -63,6 +63,26 @@ describe("Telegram conversation continuity", () => {
     expect((await t.user()).timezone).toBe("Europe/Moscow");
   });
 
+  it("identifies an invalid timezone response as app-generated without changing the visible exchange", async () => {
+    const t = await setup();
+    await t.send("/timezone probe-482");
+    const confirmation = "i have nothing yet. send it like /timezone Europe/Berlin, or just tell me your city.";
+    expect(t.sent).toEqual([confirmation]);
+    await t.send("what exact argument did I just send, and why did you reject it?");
+    await t.send("/agenda");
+    const messages = t.w.calls[0]!.messages;
+    const command = messages.find((m) => m.role === "user" && m.content.includes("/timezone probe-482"))!;
+    const response = messages.find((m) => m.role === "assistant" && m.content.includes(confirmation))!;
+    expect(command.content).toContain("[User command, handled by the application]");
+    expect(response.content).toContain("App-generated command response");
+    expect(response.content).toContain("not your own reasoning or choice");
+    expect(response.content).toContain("[End app-generated command response]");
+    const stored = await recentMessages(t.w.db, (await t.user()).id, 20);
+    expect(stored.find((m) => m.role === "emi" && m.kind === "command")?.content).toBe(confirmation);
+    expect(t.sent.join("\n")).not.toContain("App-generated command response");
+    expect(t.w.calls).toHaveLength(1);
+  });
+
   it("keeps each buffered reply attached to its own target and persists it for later turns", async () => {
     const t = await setup();
     await t.send("/start");

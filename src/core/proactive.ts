@@ -5,6 +5,7 @@ import { claimDuePings, expireStale, hasOpenInitiative, setPing, setStatus, upse
 import { describeMoment, inQuietHours, localParts, localToUtc, nextAwake } from "./clock";
 import { runExtraction } from "./extraction";
 import { activeMemories } from "./memory/store";
+import { messageContent } from "./message";
 import { PERSONA } from "./persona";
 import { joinBubbles, parseReply, renderHistory } from "./prompt";
 import type { AgendaItem, Deps, Outbound, User } from "./types";
@@ -173,7 +174,7 @@ async function planFor(deps: Deps, user: User, now: Date): Promise<boolean> {
     "", "What Emi knows that is recent:",
     ...labels.map(({ label, memory }) => `${label} [${memory.occurredOn ?? localParts(memory.createdAt, user.timezone).dateKey}] ${memory.content}`),
     "", "Recent conversation:",
-    ...history.map((message) => `${message.role === "user" ? "THEM" : "EMI"} (${describeMoment(message.createdAt, user.timezone)}): ${message.content.slice(0, 400)}`),
+    ...history.map((message) => `${message.role === "user" ? "THEM" : "EMI"} (${describeMoment(message.createdAt, user.timezone)}): ${messageContent(message).slice(0, 400)}`),
   ].join("\n");
   const result = await llm.chat([{ role: "system", content: PLANNER_SYSTEM }, { role: "user", content: prompt }],
     { model: deps.models.utility, temperature: 0.5, maxTokens: 400, json: true });

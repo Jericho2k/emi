@@ -7,7 +7,7 @@ import { admit } from "../src/core/memory/recall";
 import { decide, evidenceIsExact, looksSensitive, type Candidate } from "../src/core/memory/reconcile";
 import { classifyTurn, historyWindow, parseReply, renderHistory } from "../src/core/prompt";
 import { lowerInitiative } from "../src/core/users";
-import type { Memory } from "../src/core/types";
+import type { Memory, StoredMessage } from "../src/core/types";
 
 const HOUR = 3_600_000;
 const now = new Date("2026-11-13T12:00:00Z");
@@ -145,6 +145,23 @@ describe("prompt", () => {
     expect(historyWindow(10)).toBe(10);
     expect([50, 51, 60, 69].map((total) => total - historyWindow(total))).toEqual([20, 20, 20, 20]);
     expect(70 - historyWindow(70)).toBe(40);
+  });
+  it("marks saved command responses without mislabeling adjacent AI replies or losing quote context", () => {
+    const base = { agendaItemId: null, createdAt: now };
+    const history: StoredMessage[] = [
+      { ...base, id: 1, role: "user", kind: "command", content: "/timezone probe-482" },
+      { ...base, id: 2, role: "emi", kind: "command", content: "invalid timezone" },
+      { ...base, id: 3, role: "emi", kind: "reply", content: "here's what happened" },
+      { ...base, id: 4, role: "user", kind: "reply", content: "that one", replyTo: { author: "emi", text: "invalid timezone" } },
+    ];
+    const rendered = renderHistory(history, "UTC");
+    const assistant = rendered.find((m) => m.role === "assistant")!.content;
+    expect(assistant).toContain("App-generated command response");
+    expect(assistant).toContain("invalid timezone");
+    expect(assistant).toContain("[End app-generated command response]\n---\nhere's what happened");
+    expect(rendered.at(-1)!.content).toContain('"author":"emi","text":"invalid timezone"');
+    expect(rendered.at(-1)!.content).not.toContain("App-generated command response");
+    expect(history[1]!.content).toBe("invalid timezone");
   });
   it("stamps a message when the day changes or an hour passes, and merges same-side turns", () => {
     const at = (iso: string) => new Date(iso);
