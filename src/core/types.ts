@@ -1,5 +1,6 @@
 import type { Db } from "../db";
 import type { Llm } from "../llm/provider";
+import type { ImageInput, ImageReference } from "./images";
 import type { Clock } from "./clock";
 
 export type Initiative = "off" | "low" | "medium" | "high";
@@ -79,6 +80,7 @@ export interface ReplyContext {
 
 export interface IncomingMessage {
   text: string;
+  images?: ImageInput[];
   replyTo?: ReplyContext;
 }
 
@@ -87,6 +89,7 @@ export interface StoredMessage {
   role: "user" | "emi";
   content: string;
   kind: "reply" | "proactive" | "command";
+  images?: ImageReference[];
   replyTo?: ReplyContext;
   agendaItemId: string | null;
   createdAt: Date;
@@ -94,6 +97,8 @@ export interface StoredMessage {
 
 export interface Models {
   writer: string;
+  /** Defaults to the writer; override only when using a text-only writer. */
+  vision?: string;
   utility: string;
   embedding: string;
 }

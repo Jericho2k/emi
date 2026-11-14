@@ -106,6 +106,50 @@ Existing installations apply `0002_message_context.sql` automatically on
 startup. Earlier command exchanges were never stored and cannot be recovered
 unless Telegram includes them in a new reply.
 
+## Images and screenshots
+
+Send Emi a photo or a PNG, JPEG, WebP or GIF file, with an optional caption.
+She can read screenshots, explain diagrams, inspect visible text/code, and
+work through a task shown in the picture. For small text, send the original
+image as a file so Telegram does not compress it. A tighter crop helps when
+text is too small or blurry. Image understanding is fallible: Emi should say
+what she cannot read confidently rather than inventing details.
+
+Photos, image documents, photo albums and nearby text use the existing
+per-person turn queue. Up to six image attachments can be handled in one
+turn, with an 8 MB limit per image and 16 MB total. A text reply to an older
+Telegram picture reattaches that picture's pixels with its original caption
+and reply context, even if it is outside the recent history window.
+
+Follow-up questions automatically include up to two of the most recent images
+within the recent conversation window, subject to the same total limits.
+Current images take priority. Older image placeholders and timeline summaries
+contain no pixels; reply to or resend the original to inspect it again.
+The writer receives actual image parts, not only a generated OCR summary.
+Extraction, timeline consolidation and proactive jobs see textual attachment
+markers and the conversation, without reprocessing image pixels or treating
+visual guesses as facts explicitly stated by you.
+
+The default DeepSeek writer accepts images, so no model change or extra API
+key is required. If you choose a text-only writer, set `EMI_VISION_MODEL` to
+an image-capable OpenRouter model; otherwise leave it blank to keep the same
+writer. Every turn still uses Emi's existing persona, memories and history.
+Image tokens and replayed pictures use OpenRouter credits and appear in
+`/usage`. Web tools remain available alongside images, and image input also
+works with `EMI_WEB_ENABLED=false`.
+
+The Telegram adapter downloads images with bounded size/time, checks their
+file signatures, and passes private bytes to the model. Token-bearing
+Telegram download URLs never go into prompts or saved image references.
+Image bytes are stored separately from text history in the private
+`message_images` table, with owner-scoped loading and Row Level Security for
+the Supabase Data API. `/wipe` deletes those bytes along with messages.
+`/export` sends the JSON manifest and each original image as a separate file,
+loading one image at a time so the archive does not become a huge base64 JSON
+upload. Migration `0004_message_images.sql` runs automatically at startup.
+
+Provider format: [OpenRouter image inputs](https://openrouter.ai/docs/guides/overview/multimodal/image-understanding).
+
 ## Current information and links
 
 Web search and link reading are enabled by default for replies to your messages.
@@ -205,6 +249,6 @@ Run exactly one instance. Stop any copy on your own machine first: two processes
 ## Not built yet
 
 - A web page for memory; `/memory` and `/forget` cover it in chat for now.
-- Voice, images and files.
+- Voice, video, and general document input beyond image files.
 - Streaming replies.
 - Payments. Everyone uses their own key or the shared one.

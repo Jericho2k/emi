@@ -4,6 +4,7 @@ import { absorbOnUserMessage, openForWeave, setStatus } from "./agenda/store";
 import { recall } from "./memory/recall";
 import { timelineFor } from "./memory/timeline";
 import { agendaLabel, buildTurnMessages, classifyTurn, historyWindow, joinBubbles, parseReply, type TurnKind } from "./prompt";
+import { imageHistory, validateImages, VISION_CONTEXT } from "./images";
 import { messageContent } from "./message";
 import type { Deps, IncomingMessage } from "./types";
 import { attachSources, webContext } from "./web";
@@ -36,19 +37,22 @@ const SETTINGS: Record<TurnKind, { temperature: number; maxTokens: number }> = {
 export async function handleTurn(deps: Deps, userId: string, input: string | IncomingMessage[]): Promise<TurnResult> {
   const incoming = typeof input === "string" ? [{ text: input }] : input;
   if (!incoming.length) throw new Error("a turn needs at least one message");
+  const images = incoming.flatMap((message) => message.images ?? []);
+  validateImages(images);
   const text = incoming.map((message) => message.text).join("\n");
   const content = incoming.map(messageContent).join("\n\n");
   const { db } = deps;
   const user = await getUser(db, userId);
   if (!user) throw new Error(`unknown user ${userId}`);
   const now = deps.clock();
-  const turnKind = classifyTurn(text);
+  const classified = classifyTurn(text);
+  const turnKind = images.length && classified === "social" ? "mixed" : classified;
 
   // Read the history before storing, so the new message is not in it twice.
   const history = await recentMessages(db, userId, historyWindow(await messageCount(db, userId)));
   const previousUserAt = user.lastUserMessageAt;
   for (const message of incoming) {
-    await addMessage(db, { userId, role: "user", content: message.text, replyTo: message.replyTo, at: now });
+    await addMessage(db, { userId, role: "user", content: message.text, replyTo: message.replyTo, images: message.images, at: now });
   }
 
   // They wrote first: anything she planned to send becomes something she can
@@ -61,9 +65,9 @@ export async function handleTurn(deps: Deps, userId: string, input: string | Inc
 
   let queryVector: number[] | null = null;
   try {
-    const embedded = await llm.embed([text.slice(0, 2000)], deps.models.embedding);
-    queryVector = embedded.vectors[0] ?? null;
-    await recordUsage(db, userId, "embed_query", embedded.usage, now);
+    const embedded = text.trim() ? await llm.embed([text.slice(0, 2000)], deps.models.embedding) : null;
+    queryVector = embedded?.vectors[0] ?? null;
+    if (embedded) await recordUsage(db, userId, "embed_query", embedded.usage, now);
   } catch {
     // Word matching alone still recalls; a reply never waits on embeddings.
   }
@@ -71,17 +75,22 @@ export async function handleTurn(deps: Deps, userId: string, input: string | Inc
 
   const messages = buildTurnMessages({
     user, now, recall: recalled, weave, turnKind, previousUserAt, timeline: await timelineFor(db, user),
+    images, historyImages: await imageHistory(db, userId, history, images),
     hasPriorConversation: history.length > 0 || incoming.some((message) => !!message.replyTo),
   }, history, content);
-  messages[0]!.content += `\n\n${webContext(!!llm.capabilities?.web)}`;
+  messages[0]!.content += `\n\n${webContext(!!llm.capabilities?.web)}\n\n${VISION_CONTEXT}`;
+  const hasImages = messages.some((message) => message.images?.length);
+  const model = hasImages ? deps.models.vision ?? deps.models.writer : deps.models.writer;
   let reply;
   try {
-    reply = await llm.chat(messages, { model: deps.models.writer, ...SETTINGS[turnKind], web: !!llm.capabilities?.web });
+    reply = await llm.chat(messages, { model, ...SETTINGS[turnKind], web: !!llm.capabilities?.web });
   } catch (error) {
     if (error instanceof LlmResponseError) {
       await recordUsage(db, userId, "reply_failed", error.usage, now);
       console.warn("[reply]", error.message);
-      const notice = error.kind === "web_unavailable"
+      const notice = error.kind === "image_unavailable"
+        ? "the selected model couldn't read that image. try a smaller PNG or JPEG, or check that the model supports images."
+        : error.kind === "web_unavailable"
         ? "my web request was rejected. the OpenRouter model or tool permissions need checking; I couldn't verify that online."
         : error.kind === "request_failed"
           ? "the request failed while I was trying again. try that in a moment."

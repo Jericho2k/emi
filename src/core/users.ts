@@ -1,5 +1,6 @@
 import type { Db } from "../db";
 import type { Usage } from "../llm/provider";
+import { IMAGE_REFERENCES_SQL, validateImages, type ImageInput } from "./images";
 import { localParts, localToUtc } from "./clock";
 import { INITIATIVE_LEVELS, type Initiative, type Mood, type ReplyContext, type StoredMessage, type User } from "./types";
 
@@ -103,14 +104,28 @@ function messageFromRow(row: Row): StoredMessage {
   return {
     id: Number(row.id), role: row.role, content: row.content, kind: row.kind,
     replyTo: row.reply_context ?? undefined,
+    ...(row.images?.length ? { images: row.images } : {}),
     agendaItemId: row.agenda_item_id ?? null, createdAt: toDate(row.created_at)!,
   };
 }
 
-export async function addMessage(db: Db, input: { userId: string; role: "user" | "emi"; content: string; kind?: StoredMessage["kind"]; replyTo?: ReplyContext; agendaItemId?: string | null; at: Date }): Promise<StoredMessage> {
+export async function addMessage(db: Db, input: { userId: string; role: "user" | "emi"; content: string; kind?: StoredMessage["kind"]; images?: ImageInput[]; replyTo?: ReplyContext; agendaItemId?: string | null; at: Date }): Promise<StoredMessage> {
+  const images = input.images ?? [];
+  validateImages(images);
+  if (images.length && input.role !== "user") throw new Error("only incoming messages may attach images");
+  // One statement makes the message and its images atomic on a pooled DB.
   const { rows } = await db.query<Row>(
-    "insert into messages (user_id, role, content, kind, agenda_item_id, created_at, reply_context) values ($1, $2, $3, $4, $5, $6, $7::jsonb) returning *",
-    [input.userId, input.role, input.content, input.kind ?? "reply", input.agendaItemId ?? null, input.at, input.replyTo ? JSON.stringify(input.replyTo) : null],
+    `with message as (
+       insert into messages (user_id, role, content, kind, agenda_item_id, created_at, reply_context)
+       values ($1, $2, $3, $4, $5, $6, $7::jsonb) returning *
+     ), images as (
+       insert into message_images (message_id, position, mime_type, origin, data)
+       select message.id, image.position, image.mime_type, image.origin, decode(image.data, 'base64')
+       from message, jsonb_to_recordset($8::jsonb) as image(position int, mime_type text, origin text, data text)
+       returning id, mime_type, origin, position, octet_length(data) as byte_size
+     ) select message.*, (select jsonb_agg(jsonb_build_object('id', id, 'mimeType', mime_type, 'byteSize', byte_size, 'origin', origin) order by position) from images) as images from message`,
+    [input.userId, input.role, input.content, input.kind ?? "reply", input.agendaItemId ?? null, input.at, input.replyTo ? JSON.stringify(input.replyTo) : null,
+      JSON.stringify(images.map((image, position) => ({ position, mime_type: image.mimeType, origin: image.origin ?? null, data: Buffer.from(image.data).toString("base64") })))],
   );
   await updateUser(db, input.userId, input.role === "user" ? { lastUserMessageAt: input.at } : { lastEmiMessageAt: input.at });
   return messageFromRow(rows[0]!);
@@ -124,14 +139,14 @@ export async function messageCount(db: Db, userId: string): Promise<number> {
 /** The newest `limit` messages, oldest first. */
 export async function recentMessages(db: Db, userId: string, limit: number): Promise<StoredMessage[]> {
   const { rows } = await db.query<Row>(
-    "select * from messages where user_id = $1 order by id desc limit $2", [userId, limit],
+    `select messages.*, ${IMAGE_REFERENCES_SQL} from messages where user_id = $1 order by id desc limit $2`, [userId, limit],
   );
   return rows.map(messageFromRow).reverse();
 }
 
 export async function messagesAfter(db: Db, userId: string, afterId: number, limit = 40): Promise<StoredMessage[]> {
   const { rows } = await db.query<Row>(
-    "select * from messages where user_id = $1 and id > $2 order by id asc limit $3", [userId, afterId, limit],
+    `select messages.*, ${IMAGE_REFERENCES_SQL} from messages where user_id = $1 and id > $2 order by id asc limit $3`, [userId, afterId, limit],
   );
   return rows.map(messageFromRow);
 }
