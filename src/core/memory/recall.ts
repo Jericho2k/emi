@@ -12,6 +12,7 @@ import { activeMemories, lexicalMemories, markRelevant, nearestMemories } from "
  */
 export const HALF_LIFE_DAYS: Record<MemoryKind, number> = {
   identity: 3650, boundary: 3650, relationship: 365, preference: 365, state: 90, event: 45,
+  self: 365, us: 730,
 };
 
 /** Below this, nothing is on topic and nothing is recalled. */
@@ -21,6 +22,10 @@ export const ADMISSION_SHARE = 0.5;
 /** Safety ceiling, not a budget: small talk recalls few, a long thread many. */
 export const RELEVANT_LIMIT = 12;
 export const STANDING_LIMIT = 8;
+/** Nicknames and running jokes are carried on every turn: they are what "us" is. */
+export const US_LIMIT = 6;
+/** Her newest statements about herself, carried so she does not contradict last week. */
+export const SELF_RECENT = 3;
 const STORYLINE_EXTRA = 3;
 
 export function recency(memory: Pick<Memory, "kind" | "createdAt" | "occurredOn">, now: Date): number {
@@ -54,8 +59,12 @@ const when = (memory: Memory) => (memory.occurredOn ? new Date(`${memory.occurre
 export interface Recall {
   /** Carried on every turn: who they are, what they asked her never to do, what they pinned. */
   standing: Memory[];
-  /** Admitted for this turn on relevance, in the order things happened. */
+  /** Admitted for this turn on relevance, in the order things happened. Only about them. */
   relevant: Memory[];
+  /** What belongs to the two of them: the newest few, plus any that relate. */
+  us: Memory[];
+  /** What she said about herself: the newest few, plus any that relate. */
+  self: Memory[];
   /** Chapters of older conversation that this turn is about. */
   arcs: Arc[];
 }
@@ -63,13 +72,15 @@ export interface Recall {
 export async function recall(db: Db, userId: string, queryText: string, queryVector: number[] | null, now: Date): Promise<Recall> {
   const all = await activeMemories(db, userId);
   const arcs = queryVector ? await relevantArcs(db, userId, queryVector) : [];
-  if (!all.length) return { standing: [], relevant: [], arcs };
+  if (!all.length) return { standing: [], relevant: [], us: [], self: [], arcs };
 
   const standing = [
     ...all.filter((memory) => memory.pinned),
     ...all.filter((memory) => !memory.pinned && (memory.kind === "identity" || memory.kind === "boundary")).reverse(),
   ].slice(0, STANDING_LIMIT);
-  const standingIds = new Set(standing.map((memory) => memory.id));
+  const usRecent = all.filter((memory) => memory.kind === "us" && !memory.pinned).slice(-US_LIMIT);
+  const selfRecent = all.filter((memory) => memory.kind === "self" && !memory.pinned).slice(-SELF_RECENT);
+  const standingIds = new Set([...standing, ...usRecent, ...selfRecent].map((memory) => memory.id));
 
   const merged = new Map<string, { memory: Memory; similarity: number; lexical: number }>();
   if (queryVector) {
@@ -95,5 +106,13 @@ export async function recall(db: Db, userId: string, queryText: string, queryVec
   const storylines = new Set(admitted.map((memory) => memory.storyline).filter((name): name is string => !!name));
   const extra = all.filter((memory) => memory.storyline && storylines.has(memory.storyline) && !taken.has(memory.id)).slice(-STORYLINE_EXTRA);
 
-  return { standing, relevant: [...admitted, ...extra].sort((a, b) => when(a) - when(b)), arcs };
+  const ordered = [...admitted, ...extra].sort((a, b) => when(a) - when(b));
+  const shared = (kind: Memory["kind"], recent: Memory[]) => [...recent, ...ordered.filter((memory) => memory.kind === kind)];
+  return {
+    standing,
+    relevant: ordered.filter((memory) => memory.kind !== "us" && memory.kind !== "self"),
+    us: shared("us", usRecent),
+    self: shared("self", selfRecent),
+    arcs,
+  };
 }

@@ -12,6 +12,26 @@ export interface Mood {
   at?: string;
 }
 
+/**
+ * How the relationship stands, beyond facts. Each value is 0..1. Warmth and
+ * trust move slowly; irritation rises fast and fades on its own (see bond.ts).
+ */
+export interface Bond {
+  warmth?: number;
+  trust?: number;
+  irritation?: number;
+  /** When irritation was last set, so it can fade from there. */
+  irritationAt?: string;
+  /** What irritated her, in a few words. */
+  irritationReason?: string;
+}
+
+/** One line of what was on Emi's mind on a local day. */
+export interface InnerDay {
+  day: string;
+  thought: string;
+}
+
 export interface User {
   id: string;
   displayName: string | null;
@@ -23,6 +43,9 @@ export interface User {
   quietEnd: number;
   dailyCapUsd: number;
   mood: Mood;
+  bond: Bond;
+  innerDays: InnerDay[];
+  lastSpontaneousAt: Date | null;
   encryptedApiKey: string | null;
   lastUserMessageAt: Date | null;
   lastEmiMessageAt: Date | null;
@@ -32,8 +55,14 @@ export interface User {
   createdAt: Date;
 }
 
-export type MemoryKind = "identity" | "boundary" | "relationship" | "preference" | "state" | "event";
-export const MEMORY_KINDS: MemoryKind[] = ["identity", "boundary", "relationship", "preference", "state", "event"];
+/** What the person told her about themselves. */
+export type UserMemoryKind = "identity" | "boundary" | "relationship" | "preference" | "state" | "event";
+export const USER_MEMORY_KINDS: UserMemoryKind[] = ["identity", "boundary", "relationship", "preference", "state", "event"];
+/** self: what Emi said about herself. us: what belongs to the two of them. */
+export type SharedMemoryKind = "self" | "us";
+export const SHARED_MEMORY_KINDS: SharedMemoryKind[] = ["self", "us"];
+export type MemoryKind = UserMemoryKind | SharedMemoryKind;
+export const MEMORY_KINDS: MemoryKind[] = [...USER_MEMORY_KINDS, ...SHARED_MEMORY_KINDS];
 
 export interface Memory {
   id: string;
@@ -68,6 +97,8 @@ export interface AgendaItem {
   status: AgendaStatus;
   attempts: number;
   pingedAt: Date | null;
+  /** Planned with no reason but that she thought of them. */
+  spontaneous: boolean;
   createdAt: Date;
 }
 

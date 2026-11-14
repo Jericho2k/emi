@@ -21,7 +21,7 @@ export interface AccountExport {
 export async function exportAccount(db: Db, userId: string, now: Date): Promise<AccountExport> {
   const one = async (sql: string) => (await db.query(sql, [userId])).rows;
   const [settings] = await one(
-    "select display_name, timezone, timezone_known, initiative, quiet_start, quiet_end, daily_cap_usd, mood, created_at from users where id = $1",
+    "select display_name, timezone, timezone_known, initiative, quiet_start, quiet_end, daily_cap_usd, mood, bond, inner_days, created_at from users where id = $1",
   );
   return {
     exportedAt: now.toISOString(),
@@ -53,7 +53,8 @@ export async function wipeAccount(db: Db, userId: string): Promise<void> {
     await db.query(`delete from ${table} where user_id = $1`, [userId]);
   }
   await db.query(
-    `update users set mood = '{}'::jsonb, brushoff_count = 0, extracted_through = 0, consolidated_through = 0,
+    `update users set mood = '{}'::jsonb, bond = '{}'::jsonb, inner_days = '[]'::jsonb, last_spontaneous_at = null,
+       brushoff_count = 0, extracted_through = 0, consolidated_through = 0,
        last_user_message_at = null, last_emi_message_at = null, last_planned_on = null where id = $1`,
     [userId],
   );

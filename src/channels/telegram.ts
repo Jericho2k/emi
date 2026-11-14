@@ -1,16 +1,16 @@
 import { Bot, InputFile, type Context } from "grammy";
-import type { Message } from "grammy/types";
+import type { Message, ReactionTypeEmoji } from "grammy/types";
 import type { Config } from "../config";
 import { exportAccount, wipeAccount } from "../core/account";
 import { pendingItems } from "../core/agenda/store";
 import { describeMoment, isValidTimeZone } from "../core/clock";
-import { runExtraction } from "../core/extraction";
 import { describeImages } from "../core/image-descriptions";
 import { ImageInputError, MAX_TURN_IMAGES, findStoredImage, loadImages, validateImages } from "../core/images";
 import { encryptKey } from "../core/keys";
-import { runConsolidation } from "../core/memory/timeline";
 import { activeMemories, deleteMemory, findByShortId, insertMemory } from "../core/memory/store";
-import { handleTurn } from "../core/pipeline";
+import { afterTurn, handleTurn } from "../core/pipeline";
+import { classifyTurn } from "../core/prompt";
+import { bubbleWaits, isPaced, typingMs } from "../core/rhythm";
 import { INITIATIVE_LEVELS, type Deps, type Initiative, type IncomingMessage, type Outbound, type User } from "../core/types";
 import { addMessage, chatIdFor, getUser, spentToday, updateUser, userForChannel } from "../core/users";
 import { chunkText, toTelegramHtml } from "./telegram-format";
@@ -38,11 +38,26 @@ const HELP = [
 export function createTelegram(deps: Deps, config: Config): { bot: Bot; outbound: Outbound } {
   const bot = new Bot(config.telegramToken);
 
-  async function sendBubbles(chatId: string | number, bubbles: string[]): Promise<void> {
-    const pieces = bubbles.flatMap((bubble) => chunkText(bubble));
-    for (const [index, piece] of pieces.entries()) {
-      // Just enough of a gap that separate messages arrive in order.
-      if (index > 0) await new Promise((resolve) => setTimeout(resolve, 350));
+  const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+  const typing = (chatId: string | number) => void bot.api.sendChatAction(chatId, "typing").catch(() => undefined);
+
+  /**
+   * Sends bubbles in order. Paced, each one is "typed" first, for about as
+   * long as a person would take; `waits` says how long, per bubble.
+   */
+  async function sendBubbles(chatId: string | number, bubbles: string[], waits?: number[]): Promise<void> {
+    const pieces = bubbles.flatMap((bubble, index) => chunkText(bubble).map((piece, part) => ({ piece, wait: part === 0 ? waits?.[index] : undefined })));
+    for (const [index, { piece, wait }] of pieces.entries()) {
+      if (wait !== undefined && wait > 0) {
+        // Telegram shows "typing" for about five seconds, so a longer wait renews it.
+        for (let left = wait; left > 0; left -= 4500) {
+          typing(chatId);
+          await sleep(Math.min(left, 4500));
+        }
+      } else if (index > 0) {
+        // Just enough of a gap that separate messages arrive in order.
+        await sleep(350);
+      }
       try {
         await bot.api.sendMessage(chatId, toTelegramHtml(piece), { parse_mode: "HTML", link_preview_options: { is_disabled: true } });
       } catch {
@@ -56,7 +71,9 @@ export function createTelegram(deps: Deps, config: Config): { bot: Bot; outbound
     async send(userId, bubbles) {
       const chatId = await chatIdFor(deps.db, userId, CHANNEL);
       if (!chatId) throw new Error(`no telegram chat for user ${userId}`);
-      await sendBubbles(chatId, bubbles);
+      // Writing first is chatting: the first message simply arrives (nobody was
+      // watching her type it), and any further ones are typed, never dumped.
+      await sendBubbles(chatId, bubbles, config.pacing ? bubbles.map((bubble, index) => (index ? typingMs(bubble, deps.random) : 0)) : undefined);
     },
   };
 
@@ -135,8 +152,14 @@ export function createTelegram(deps: Deps, config: Config): { bot: Bot; outbound
   command("memory", async (_ctx, user, _arg, reply) => {
     const memories = await activeMemories(deps.db, user.id);
     if (!memories.length) return reply("nothing yet.");
-    const lines = memories.map((m) => `${m.id.slice(0, 6)} · ${m.pinned ? "📌 " : ""}${m.kind === "event" && m.occurredOn ? `[${m.occurredOn}] ` : ""}${m.content}`);
-    for (const piece of chunkText(`${lines.join("\n")}\n\n/forget <id> removes one.`)) await reply(piece);
+    const line = (m: typeof memories[number]) => `${m.id.slice(0, 6)} · ${m.pinned ? "📌 " : ""}${m.kind === "event" && m.occurredOn ? `[${m.occurredOn}] ` : ""}${m.content}`;
+    const section = (title: string, items: typeof memories) => (items.length ? [`${title}\n${items.map(line).join("\n")}`] : []);
+    const text = [
+      ...section("about you", memories.filter((m) => m.kind !== "self" && m.kind !== "us")),
+      ...section("about me", memories.filter((m) => m.kind === "self")),
+      ...section("us", memories.filter((m) => m.kind === "us")),
+    ].join("\n\n");
+    for (const piece of chunkText(`${text}\n\n/forget <id> removes one.`)) await reply(piece);
   });
 
   command("remember", async (_ctx, user, arg, reply) => {
@@ -227,9 +250,27 @@ export function createTelegram(deps: Deps, config: Config): { bot: Bot; outbound
 
   // ---- conversation ----
 
+  /** A reaction on their message; if Telegram refuses it, the emoji is sent as a message instead. */
+  async function react(chatId: number, messageId: number, emoji: string, alsoReplying: boolean): Promise<void> {
+    try {
+      await bot.api.setMessageReaction(chatId, messageId, [{ type: "emoji", emoji: emoji as ReactionTypeEmoji["emoji"] }]);
+    } catch {
+      if (!alsoReplying) await bot.api.sendMessage(chatId, emoji).catch(() => undefined);
+    }
+  }
+
   async function runTurn(userId: string, chatId: number, batch: PendingInput[]): Promise<void> {
-    const typing = setInterval(() => void bot.api.sendChatAction(chatId, "typing").catch(() => undefined), 4500);
-    void bot.api.sendChatAction(chatId, "typing").catch(() => undefined);
+    const started = Date.now();
+    const kind = classifyTurn(batch.map((item) => item.input.text).join("\n"));
+    const paced = !!config.pacing && isPaced(kind) && !batch.some((item) => telegramImageFile(item.message));
+    // Paced, she reads for a moment before "typing" shows; the model is already writing meanwhile.
+    let typingTimer: NodeJS.Timeout | undefined;
+    const startTyping = () => {
+      typing(chatId);
+      typingTimer = setInterval(() => typing(chatId), 4500);
+    };
+    const readTimer = setTimeout(startTyping, paced ? 600 + deps.random() * 900 : 0);
+    const stopTyping = () => { clearTimeout(readTimer); clearInterval(typingTimer); };
     try {
       // Register arrivals before doing I/O so photos, album entries and nearby
       // text stay in order even when Telegram downloads are slow.
@@ -241,12 +282,12 @@ export function createTelegram(deps: Deps, config: Config): { bot: Bot; outbound
         validateImages(messages.flatMap((message) => message.images ?? []));
       }
       const result = await handleTurn(deps, userId, messages);
-      clearInterval(typing);
-      await sendBubbles(chatId, result.bubbles);
+      stopTyping();
+      const last = batch.at(-1)?.message;
+      if (result.reaction && last) await react(chatId, last.message_id, result.reaction, result.bubbles.length > 0);
+      await sendBubbles(chatId, result.bubbles, paced ? bubbleWaits(result.bubbles, Date.now() - started, deps.random) : undefined);
       if (!result.problem) {
-        void runExtraction(deps, userId, { memoryIds: result.recalledIds })
-          .then(() => runConsolidation(deps, userId))
-          .catch((error) => console.warn("[background]", error));
+        void afterTurn(deps, userId, result).catch((error) => console.warn("[background]", error));
         // Written while the person reads the reply, ready before the picture
         // stops being attached to follow-ups.
         void describeImages(deps, userId).catch((error) => console.warn("[background]", error));
@@ -261,7 +302,7 @@ export function createTelegram(deps: Deps, config: Config): { bot: Bot; outbound
       console.error("[turn] failed", error);
       await bot.api.sendMessage(chatId, "something broke on my side. try that again in a moment.").catch(() => undefined);
     } finally {
-      clearInterval(typing);
+      stopTyping();
     }
   }
 

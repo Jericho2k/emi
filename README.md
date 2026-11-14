@@ -1,6 +1,6 @@
 # Emi
 
-Emi is a chat companion who is also a capable assistant. There is one conversation and it never resets. She answers questions and does tasks like any assistant, remembers what you tell her, reminds you of things you asked about, and sometimes checks in the way a friend would.
+Emi is a chat companion who is also a capable assistant. There is one conversation and it never resets. She answers questions and does tasks like any assistant, remembers what you tell her, reminds you of things you asked about, and sometimes checks in the way a friend would. She has a personality of her own and things on her mind, and the way she talks to you changes as the two of you get to know each other. Whatever her mood or how close you are, she helps fully and well.
 
 She runs as a Telegram bot. The core knows nothing about Telegram, so another channel (an app with an avatar, for example) is a second adapter on the same core.
 
@@ -46,10 +46,17 @@ To talk to Emi with real models but no Telegram and no database, using a throwaw
 OPENROUTER=sk-or-... npm run live
 ```
 
-Type `+3h` or `+1d` to move the clock forward and let her act on her own, and `/memory`, `/agenda` or `/usage` to see her state. To replay a scripted conversation:
+Type `+3h` or `+1d` to move the clock forward and let her act on her own, and `/memory`, `/agenda`, `/bond` or `/usage` to see her state. To replay a scripted conversation:
 
 ```bash
 OPENROUTER=sk-or-... npm run live scripts/scenario.txt
+```
+
+To choose a writer model, play the same conversations (a first meeting, and a relationship two weeks in) through several models and read the replies side by side, with latency and cost:
+
+```bash
+OPENROUTER=sk-or-... npx tsx scripts/compare-models.ts > report.md
+OPENROUTER=sk-or-... npx tsx scripts/compare-models.ts deepseek/deepseek-v4.1-flash meta/muse-ember > report.md
 ```
 
 The key is read from the environment only. Never put it in a file in this repository.
@@ -59,7 +66,7 @@ The key is read from the environment only. Never put it in a file in this reposi
 | Command | What it does |
 |---|---|
 | `/key <key>` | Use your own OpenRouter key. Stored encrypted; the message is deleted. |
-| `/memory` | Everything Emi knows about you. |
+| `/memory` | Everything Emi knows: about you, about herself, and about the two of you. |
 | `/remember <text>` | Tell her something to keep. Pinned, never rewritten by a model. |
 | `/forget <id>` | Remove one memory. The text is erased, not hidden. |
 | `/agenda` | What she plans to bring up, and when. |
@@ -273,6 +280,15 @@ Existing agenda rows are not deleted by this update and expire normally.
 - An **initiative** is her own reason to write, planned at most once a day, and only from memories she can cite. Most days the planner returns nothing.
 
 If you write first, she raises a follow-up or initiative in that conversation, and its ping is cancelled. A ping needs several hours of silence, respects quiet hours and a daily budget, and is never sent while an earlier check-in is unanswered. The message is written at send time against the current conversation, and the writer may decide to hold it. Three brush-offs in a row lower her initiative one step.
+
+**The relationship** (`src/core/bond.ts`, `src/core/inner.ts`, `src/core/rhythm.ts`). Everything here changes how she talks, never whether or how well she helps.
+
+- *Closeness* is never a number a model sets. It comes from on how many different days you have talked, how much, and how much she knows, so it builds over weeks and one long night does not count for much. Warmth and trust tilt it, and move in small fixed steps after each exchange (the extractor only gives a direction). It is a romance: five stages (just met, flirting, falling for them, together, deeply in love) change how openly romantic she is, and she never skips ahead. From "falling for them" on, she misses you when you have been away for days, without ever guilting you for it. She is never possessive, keeps it romantic rather than explicit, and drops romance entirely for anyone under 18.
+- *Irritation* rises when she is treated badly and halves every four hours; an apology takes most of it away. A little makes her drier; a lot and she says so, once, and does not write first until it has faded. Reminders still go out, and every request still gets her full effort.
+- *Her own memories.* Besides what you tell her, she keeps what she said about herself (opinions, promises), quoted from her own messages, and what belongs to the two of you (nicknames, running jokes, shared moments). The newest few of each are in every turn, so she stays the same person and the in-jokes survive the history window.
+- *Her days.* Once a day, for people who talked to her lately, one cheap call writes a line of what has been on her mind: a rabbit hole in one of her interests, sometimes continuing an earlier day's. She brings it up when it fits, such as when you ask what she has been up to. She is an AI, so it is made of thoughts, never of things she could not have done.
+- *Writing just because.* Once you are together, the daily planner may also plan a message with no event behind it, at most every three days, grounded in something you love or something between you. It counts against the same daily budget.
+- *Texting rhythm.* In chat (never for a task), she shows "typing" for about as long as a person would take, and sends bubbles one by one; the model's own writing time counts, so a slow model is never slowed further. `EMI_PACING=false` turns this off. When a message needs no answer she may just react with an emoji instead.
 
 **Long history** (`src/core/memory/timeline.ts`). The writer sees the newest 30 to 49 messages in full. When a block of 20 leaves that window, one cheap call writes an arc for exactly those messages: a chapter summary and a one-line headline. The newest arcs appear as headlines; a run of six arcs is folded once into a chapter, and a run of six chapters once into a part. Nothing folded is summarised again, so the order of events cannot drift, and the record grows only logarithmically with the length of the chat. It sits right after the persona in the prompt and changes only when a block is consolidated. When a turn is about an old chapter, that chapter's full summary is added to the turn's notes.
 
