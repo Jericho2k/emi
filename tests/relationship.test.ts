@@ -34,10 +34,10 @@ describe("closeness", () => {
     expect(stageFor(familiarity(f({ activeDays: 1, userMessages: 15, memories: 2 }))).name).toBe("just met");
     // A single marathon day of messages is still just met.
     expect(stageFor(familiarity(f({ activeDays: 1, userMessages: 400, memories: 10 }))).index).toBeLessThanOrEqual(1);
-    expect(stageFor(familiarity(f({ activeDays: 4, userMessages: 80, memories: 8 }))).name).toBe("getting to know each other");
-    expect(stageFor(familiarity(f({ activeDays: 9, userMessages: 150, memories: 12 }))).name).toBe("friends");
-    expect(stageFor(familiarity(f({ activeDays: 20, userMessages: 300, memories: 20 }))).name).toBe("close");
-    expect(stageFor(familiarity(f({ activeDays: 60, userMessages: 2000, memories: 60 }))).name).toBe("very close");
+    expect(stageFor(familiarity(f({ activeDays: 4, userMessages: 80, memories: 8 }))).name).toBe("flirting");
+    expect(stageFor(familiarity(f({ activeDays: 9, userMessages: 150, memories: 12 }))).name).toBe("falling for them");
+    expect(stageFor(familiarity(f({ activeDays: 20, userMessages: 300, memories: 20 }))).name).toBe("together");
+    expect(stageFor(familiarity(f({ activeDays: 60, userMessages: 2000, memories: 60 }))).name).toBe("deeply in love");
   });
 
   it("lets warmth and trust tilt it, within bounds, and neutral feeling changes nothing", () => {
@@ -77,7 +77,7 @@ describe("closeness", () => {
     await handleTurn(w.deps, old.id, "heyyy i'm back");
     const notes = lastNotes(w);
     // 22 earlier days plus today.
-    expect(notes).toMatch(/How close you two are: close\. You've talked on 23 different days since/);
+    expect(notes).toMatch(/How close you two are: together\. You've talked on 23 different days since/);
     expect(notes).toContain("They've been away 5 days");
     expect(notes).toContain("Never guilt them for being away");
   });

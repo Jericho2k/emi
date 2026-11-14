@@ -60,11 +60,11 @@ async function compose(deps: Deps, user: User, item: AgendaItem, now: Date): Pro
   const notes = item.kind === "reminder"
     ? `They asked you to remind them about this, and now is the time: "${item.about}". Tell them, briefly, in your own voice.`
     : item.spontaneous ? [
-      "Nobody wrote to you. You are writing just because: you're close, and this made you think of them.",
+      "Nobody wrote to you. You are writing just because: you're together, and this made you think of them.",
       `What it's about: "${item.about}".`,
       item.reason ? `Why it made you think of them: ${item.reason}.` : "",
       "Read the conversation above first. If the moment is wrong (they're busy, stressed, or it would land oddly now), reply with exactly HOLD.",
-      "Otherwise text it the way you'd send a friend something: short, light, specific. No \"thinking of you\", no \"just checking in\", no question they have to answer.",
+      "Otherwise text it the way you'd send something to the person you're with: short, light, specific, a little sweet. Not a bare \"thinking of you\" or \"just checking in\", and no question they have to answer.",
     ].filter(Boolean).join("\n") : [
       "Nobody wrote to you. You are writing first, because you thought of them.",
       `What it's about: "${item.about}".`,
@@ -150,7 +150,7 @@ Rules:
 - If they have seemed busy, stressed or short lately, null.
 - "just_because" is false for all of the above.
 
-Sometimes the input says Emi is close enough to them to write just because. Then she may also reach out with no event behind it, the way close friends send each other things: a thought on her mind today ("t1") that connects to something they love, a callback to a joke between them, a fact they would enjoy given what they like. Then "just_because" is true, "importance" is 2, and "based_on" cites what it connects (at least one of their memories). It must be something that would make THEM smile, specific to them; never "thinking of you", never a question they owe an answer to. Even then, null is still the most common answer.`;
+Sometimes the input says Emi and they are together (she's their girlfriend), so she may write just because. Then she may also reach out with no event behind it, the way partners send each other things: a thought on her mind today ("t1") that connects to something they love, a callback to a joke or pet name between them, a fact they would enjoy given what they like. Then "just_because" is true, "importance" is 2, and "based_on" cites what it connects (at least one of their memories). It must be something that would make THEM smile, specific to them; never "thinking of you", never a question they owe an answer to. Even then, null is still the most common answer.`;
 
 const ReachOut = z.object({
   about: z.string().trim().min(3).max(160),
@@ -223,7 +223,7 @@ async function planFor(deps: Deps, user: User, now: Date): Promise<boolean> {
     "", "What Emi knows that is recent:",
     ...labels.slice(0, recent.length).map(({ label, memory }) => `${label} [${memory.occurredOn ?? localParts(memory.createdAt, user.timezone).dateKey}] ${memory.content}`),
     ...(justBecause ? [
-      "", "Emi is close enough to them to write just because. What they love and what is between them:",
+      "", "Emi and they are together, so she may write just because. What they love and what is between them:",
       ...labels.slice(recent.length).map(({ label, memory }) => `${label} [${memory.kind}] ${memory.content}`),
       ...(inner ? [`t1 [on Emi's mind today] ${inner}`] : []),
     ] : []),

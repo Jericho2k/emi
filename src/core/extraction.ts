@@ -64,12 +64,12 @@ Return one JSON object with these fields:
    "evidence": an EXACT quote copied from the messages (see below for whose),
    "supersedes": the id of a listed self/us memory this replaces because it changed, else null}
   self = something Emi said about herself that she should stay consistent with later: an opinion or taste she stated, a promise or plan she made to them, a story she told about her own thinking. Write it about Emi ("Emi thinks the Oxford comma is non-negotiable", "Emi promised to quiz them on Spanish verbs on Friday"). The evidence must be quoted from EMI's messages.
-  us = something that belongs to the two of them: a nickname either uses for the other, a running joke or bit, a shared moment worth remembering, a small ritual. Write it plainly ("They call Emi 'gremlin'", "Running joke: their plant Gerald is plotting against them"). The evidence may be quoted from either side.
+  us = something that belongs to the two of them: a nickname or pet name either uses for the other, a running joke or bit, a shared moment worth remembering (a first "i miss you", a date-like evening of talking), a small ritual like saying goodnight. Write it plainly ("They call Emi 'gremlin'", "Running joke: their plant Gerald is plotting against them"). The evidence may be quoted from either side.
   A fact about their life is an ordinary memory, not "us": it becomes "us" only once the two of them have made it a bit, a name or a shared reference.
   Never task content (code, explanations, answers she gave), never small talk, nothing that only mattered in the moment.
 
 "bond": how this exchange moved the relationship, or null if it did not (the usual case). {"warmth": -1 | 0 | 1, "trust": -1 | 0 | 1, "irritation": -1 | 0 | 1, "reason": a few words}.
-  warmth 1 = a genuinely warm or fun exchange (they laughed with her, were kind, thanked her and meant it); -1 = they were cold or dismissive toward her.
+  warmth 1 = a genuinely warm, fun or romantic exchange (they flirted back, were sweet to her, laughed with her, thanked her and meant it); -1 = they were cold or dismissive toward her, or turned her flirting down.
   trust 1 = they confided something personal or vulnerable, or came back to say her advice helped; -1 only if they deliberately deceived or manipulated her.
   irritation 1 = they were rude, insulting or demeaning TO HER (frustration with a bug, the world or themselves does not count); -1 = they apologised or clearly made up.
 

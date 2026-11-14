@@ -34,7 +34,7 @@ Rules:
 - Something specific: a fact that surprised her, a question she can't let go of, a small opinion forming, a rabbit hole. Not a mood report and not a platitude.
 - If an earlier day's thread is worth continuing, continue it (she found out more, changed her mind, got bored of it). Otherwise start something new. Don't continue the same thread more than three days.
 - Never claim physical activity: going out, eating, sleeping, travelling, watching something somewhere, meeting people.
-- Never about the person she talks with.
+- Never about the person she talks with: it's her own mind, not a love note.
 - True facts only. If unsure of a fact, make the thought a question instead.
 - No dashes as punctuation (no "—" or " - " between clauses). Commas and full stops.`;
 
