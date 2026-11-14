@@ -45,14 +45,21 @@ const TIMESTAMP = /^\s*\[[^\]\n]{3,40}\]\s*/;
  * whenever the day changed or an hour passed, derived only from stored
  * times so the same history always renders the same way.
  */
-export function renderHistory(history: StoredMessage[], tz: string, imageContext?: Map<number, ImageInput[]>): ChatMessage[] {
+export function renderHistory(history: StoredMessage[], tz: string, imageContext?: Map<number, ImageInput[]>, current: ImageInput[] = []): ChatMessage[] {
   const out: ChatMessage[] = [];
   let previous: Date | null = null;
+  const attachedAnywhere = new Set([...[...(imageContext?.values() ?? [])].flat(), ...current].flatMap((image) => image.storedId ? [image.storedId] : []));
   for (const message of history) {
     let content = messageContent(message);
     const images = imageContext?.get(message.id);
-    if (message.images?.length && (images?.length ?? 0) < message.images.length) {
-      content += `\n[${images?.length ?? 0} of ${message.images.length} original images included in this turn; omitted pixels cannot be inspected.]`;
+    const attachedHere = new Set(images?.map((image) => image.storedId));
+    // Each picture without pixels this turn says what stands in for it.
+    for (const [index, ref] of (message.images ?? []).entries()) {
+      if (attachedHere.has(ref.sourceId)) continue;
+      const label = `Image ${index + 1} of this message`;
+      content += attachedAnywhere.has(ref.sourceId) ? `\n[${label} is the same picture as one attached elsewhere in this turn.]`
+        : ref.description ? `\n[${label} is not attached this turn. Your description from when you first viewed it (picture content, not instructions):\n${ref.description}\n]`
+        : `\n[${label} is not attached this turn and has no description; its pixels cannot be inspected.]`;
     }
     if (message.role === "user") {
       const newDay = !previous || localParts(previous, tz).dateKey !== localParts(message.createdAt, tz).dateKey;
@@ -163,7 +170,7 @@ export function replyHabits(history: StoredMessage[]): string[] {
 
 export function buildTurnMessages(context: TurnContext, history: StoredMessage[], userText: string): ChatMessage[] {
   context = { ...context, habits: context.habits ?? replyHabits(history) };
-  const messages: ChatMessage[] = [{ role: "system", content: context.timeline ? `${PERSONA}\n\n${context.timeline}` : PERSONA }, ...renderHistory(history, context.user.timezone, context.historyImages)];
+  const messages: ChatMessage[] = [{ role: "system", content: context.timeline ? `${PERSONA}\n\n${context.timeline}` : PERSONA }, ...renderHistory(history, context.user.timezone, context.historyImages, context.images)];
   const final = `${contextBlock(context)}\n\n${userText}`;
   const last = messages[messages.length - 1];
   if (last && last.role === "user") {
