@@ -1,5 +1,6 @@
 import { vectorLiteral, type Db } from "../../db";
 import { LlmResponseError, parseJsonObject } from "../../llm/provider";
+import { ConversationReset, inConversation } from "../conversation";
 import { describeDay, localParts } from "../clock";
 import { IMAGE_REFERENCES_SQL } from "../images";
 import { messageContent } from "../message";
@@ -169,8 +170,8 @@ Return JSON: {"summary": "..."}
 
 At most 130 words, past tense, in chronological order. Keep what still matters long after: names, decisions, outcomes, turning points, lasting changes in their life or between the two of them. Drop one-off tasks and small talk. Only what the entries say. Refer to the person as "they" and to Emi by name. Keep the language of the entries.`;
 
-const running = new Set<string>();
-const retryAfter = new Map<string, number>();
+const running = new WeakSet<Db>();
+const retryAfter = new WeakMap<Db, number>();
 
 export interface ConsolidationResult {
   arcs: number;
@@ -183,17 +184,22 @@ export interface ConsolidationResult {
  * it does nothing, and costs nothing, until a block has actually left.
  */
 export async function runConsolidation(deps: Deps, userId: string): Promise<ConsolidationResult | null> {
-  if (running.has(userId) || (retryAfter.get(userId) ?? 0) > deps.clock().getTime()) return null;
-  running.add(userId);
+  return inConversation(deps, userId, (deps) => consolidateOnce(deps, userId));
+}
+
+async function consolidateOnce(deps: Deps, userId: string): Promise<ConsolidationResult | null> {
+  if (running.has(deps.db) || (retryAfter.get(deps.db) ?? 0) > deps.clock().getTime()) return null;
+  running.add(deps.db);
   try {
     return await consolidate(deps, userId);
   } catch (error) {
+    if (error instanceof ConversationReset) throw error;
     // A broken provider must not become a paid request every tick.
-    retryAfter.set(userId, deps.clock().getTime() + 10 * 60_000);
+    retryAfter.set(deps.db, deps.clock().getTime() + 10 * 60_000);
     console.warn("[timeline] failed", error instanceof Error ? error.message : error);
     return null;
   } finally {
-    running.delete(userId);
+    running.delete(deps.db);
   }
 }
 
@@ -236,6 +242,7 @@ async function consolidate(deps: Deps, userId: string): Promise<ConsolidationRes
     result = await llm.chat([{ role: "system", content: ARC_SYSTEM }, { role: "user", content: transcript }],
       { model: deps.models.utility, temperature: 0.2, maxTokens: 700, json: true });
   } catch (error) {
+    if (error instanceof ConversationReset) throw error;
     if (error instanceof LlmResponseError) await recordUsage(db, userId, "timeline_failed", error.usage, now);
     throw error;
   }

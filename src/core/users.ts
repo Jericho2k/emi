@@ -1,5 +1,6 @@
 import type { Db } from "../db";
 import type { Usage } from "../llm/provider";
+import { checkConversation, rootDb } from "./conversation";
 import { IMAGE_REFERENCES_SQL, validateImages, type ImageInput } from "./images";
 import { localParts, localToUtc } from "./clock";
 import { INITIATIVE_LEVELS, type Bond, type InnerDay, type Initiative, type Mood, type ReplyContext, type StoredMessage, type User } from "./types";
@@ -175,10 +176,12 @@ export async function messagesAfter(db: Db, userId: string, afterId: number, lim
 // ---- usage ----
 
 export async function recordUsage(db: Db, userId: string, purpose: string, usage: Usage, at: Date): Promise<void> {
-  await db.query(
+  await rootDb(db).query(
     "insert into usage_events (user_id, purpose, model, input_tokens, output_tokens, cost_usd, created_at) values ($1, $2, $3, $4, $5, $6, $7)",
     [userId, purpose, usage.model, usage.inputTokens, usage.outputTokens, usage.costUsd, at],
   );
+  // Keep billed usage, then discard a stale response before it starts more work.
+  await checkConversation(db);
 }
 
 function startOfLocalDay(now: Date, tz: string): Date {

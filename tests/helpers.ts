@@ -2,16 +2,19 @@ import { PGlite } from "@electric-sql/pglite";
 import { vector } from "@electric-sql/pglite-pgvector";
 import type { Deps, Outbound, User } from "../src/core/types";
 import { getUser, userForChannel } from "../src/core/users";
-import { migrate, type Db } from "../src/db";
+import { migrate, transactionalDb, type Db } from "../src/db";
 import { EMBEDDING_DIMENSIONS, type ChatMessage, type ChatOptions, type Llm } from "../src/llm/provider";
 
 /** A real Postgres with pgvector, in process. */
 export async function testDb(): Promise<Db> {
   const pg = await PGlite.create({ extensions: { vector } });
-  const db: Db = {
+  const db: Db = transactionalDb({
     query: async (sql, params = []) => ({ rows: (await pg.query(sql, params as any[])).rows as any[] }),
     exec: async (sql) => { await pg.exec(sql); },
-  };
+  }, (work) => pg.transaction(async (tx) => work({
+    query: async (sql, params = []) => ({ rows: (await tx.query(sql, params)).rows as never[] }),
+    exec: async (sql) => { await tx.exec(sql); },
+  })));
   await migrate(db);
   return db;
 }

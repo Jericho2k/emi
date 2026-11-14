@@ -1,5 +1,6 @@
 import { LlmResponseError } from "../llm/provider";
 import { ProviderError } from "../llm/openrouter";
+import { conversationDeps, ConversationReset, inConversation } from "./conversation";
 import { absorbOnUserMessage, openForWeave, setStatus } from "./agenda/store";
 import { bondSnapshot } from "./bond";
 import { runExtraction } from "./extraction";
@@ -42,6 +43,7 @@ const SETTINGS: Record<TurnKind, { temperature: number; maxTokens: number }> = {
  * execution. Memory extraction still happens after the reply.
  */
 export async function handleTurn(deps: Deps, userId: string, input: string | IncomingMessage[]): Promise<TurnResult> {
+  deps = await conversationDeps(deps, userId);
   const raw = typeof input === "string" ? [{ text: input }] : input;
   if (!raw.length) throw new Error("a turn needs at least one message");
   validateImages(raw.flatMap((message) => message.images ?? []));
@@ -136,7 +138,17 @@ export async function handleTurn(deps: Deps, userId: string, input: string | Inc
  * long timeline, and what is on her mind today. Each step fails on its own.
  */
 export async function afterTurn(deps: Deps, userId: string, result: Pick<TurnResult, "recalledIds">): Promise<void> {
-  await runExtraction(deps, userId, { memoryIds: result.recalledIds }).catch((error) => console.warn("[extraction]", error));
-  await runConsolidation(deps, userId).catch((error) => console.warn("[timeline]", error));
-  await ensureInnerDay(deps, userId).catch((error) => console.warn("[inner]", error));
+  await inConversation(deps, userId, async (deps) => {
+    for (const [label, step] of [
+      ["extraction", () => runExtraction(deps, userId, { memoryIds: result.recalledIds })],
+      ["timeline", () => runConsolidation(deps, userId)],
+      ["inner", () => ensureInnerDay(deps, userId)],
+    ] as const) {
+      try { await step(); }
+      catch (error) {
+        if (error instanceof ConversationReset) throw error;
+        console.warn(`[${label}]`, error);
+      }
+    }
+  });
 }
