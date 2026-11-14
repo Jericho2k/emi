@@ -5,7 +5,7 @@ import { openRouter } from "./llm/openrouter";
 import type { Llm } from "./llm/provider";
 
 const Env = z.object({
-  TELEGRAM_BOT_TOKEN: z.string().min(10),
+  TELEGRAM_BOT_TOKEN: z.string().trim().min(10),
   DATABASE_URL: z.string().min(10),
   EMI_MASTER_KEY: z.string().min(40),
   EMI_SHARED_OPENROUTER_KEY: z.string().optional(),

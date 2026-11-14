@@ -141,6 +141,21 @@ works with `EMI_WEB_ENABLED=false`.
 The Telegram adapter downloads images with bounded size/time, checks their
 file signatures, and passes private bytes to the model. Token-bearing
 Telegram download URLs never go into prompts or saved image references.
+File downloads use a dedicated IPv4 connection pool and retry a temporary
+failure once, refreshing Telegram's file metadata before retrying. Each
+attempt has a 30-second deadline. Only bounded redirects within the same
+Telegram bot-file endpoint are followed. An album is passed to the model
+only after all its images have been retrieved successfully.
+
+If retrieval still fails, check Railway's deployment logs for
+`[telegram:image]`. These records identify the stage (`get_file`, `file_path`,
+`download`, `redirect`, or `body`), a safe error code, any HTTP/API status,
+and whether a retry is being attempted. They deliberately exclude bot tokens,
+download URLs, file IDs, captions and raw provider errors. A retrieval failure
+happens before the image reaches the model; changing the model cannot repair
+it. IPv4 is scoped to these downloads because Railway's
+[outbound IPv6 is opt-in](https://docs.railway.com/networking/outbound-networking).
+
 Image bytes are stored separately from text history in the private
 `message_images` table, with owner-scoped loading and Row Level Security for
 the Supabase Data API. `/wipe` deletes those bytes along with messages.

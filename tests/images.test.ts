@@ -37,10 +37,10 @@ describe("Telegram image input", () => {
     const input = await telegramImages({ getFile } as unknown as Pick<Api, "getFile">, "private-token", msg, telegramInput(msg, 999));
     expect(input.text).toBe(msg.caption);
     expect(input.images).toEqual([image]);
-    expect(getFile).toHaveBeenCalledWith("large");
+    expect(getFile).toHaveBeenCalledWith("large", expect.any(AbortSignal));
     expect(JSON.stringify(input)).not.toContain("private-token");
     expect(JSON.stringify(input)).not.toContain("api.telegram.org");
-    expect(fetch.mock.calls[0]![1].redirect).toBe("error");
+    expect(fetch.mock.calls[0]![1].redirect).toBe("manual");
   });
 
   it("accepts image files and pictures referenced by a text reply", async () => {
@@ -80,7 +80,7 @@ describe("Telegram image input", () => {
     expect((error as Error).cause).toBeUndefined();
   });
 
-  it("keeps a two-photo album and nearby text in one ordered turn", async () => {
+  it("keeps a three-photo album intact when one image needs a download retry", async () => {
     const w = await world();
     const { bot } = createTelegram(w.deps, { telegramToken: "123456:test-token", databaseUrl: "unused", masterKey: Buffer.alloc(32), sharedKey: "shared", allowedTelegramIds: null, models: w.deps.models });
     bot.botInfo = botUser;
@@ -89,7 +89,10 @@ describe("Telegram image input", () => {
     const exported: Array<string | undefined> = [];
     bot.api.config.use(async (previous, method, payload) => {
       if (method === "sendMessage" && "text" in payload) sent.push(String(payload.text));
-      if (method === "getFile" && "file_id" in payload) fetched.push(String(payload.file_id));
+      if (method === "getFile" && "file_id" in payload) {
+        fetched.push(String(payload.file_id));
+        if (fetched.length === 3) throw Object.assign(new Error("temporary metadata connection failure"), { code: "ECONNRESET" });
+      }
       if (method === "sendDocument" && "document" in payload && payload.document instanceof InputFile) exported.push(payload.document.filename);
       const result = method === "getFile" ? { file_path: "photos/image.png" } : method === "sendMessage" ? { ...text(String((payload as { text: string }).text)), from: botUser } : true;
       return { ok: true, result } as Awaited<ReturnType<typeof previous>>;
@@ -98,19 +101,20 @@ describe("Telegram image input", () => {
     const send = (message: Message, update_id: number) => bot.handleUpdate({ message, update_id } as Update);
     await send(photo({ caption: "first", media_group_id: "album" }), 1);
     await send(photo({ message_id: 2, caption: "second", media_group_id: "album" }), 2);
-    await send(text("compare them"), 3);
+    await send(photo({ message_id: 3, caption: "third", media_group_id: "album" }), 3);
+    await send(text("compare them"), 4);
     // Flush pending arrivals without waiting for the debounce timeout.
-    await send({ ...text("/agenda"), entities: [{ type: "bot_command", offset: 0, length: 7 }] }, 4);
+    await send({ ...text("/agenda"), entities: [{ type: "bot_command", offset: 0, length: 7 }] }, 5);
     expect(w.calls).toHaveLength(1);
     const final = w.calls[0]!.messages.at(-1)!;
-    expect(final.images).toHaveLength(2);
+    expect(final.images).toHaveLength(3);
     expect(final.content.indexOf("first")).toBeLessThan(final.content.indexOf("second"));
     expect(final.content).toContain("compare them");
-    expect(fetched).toEqual(["large", "large"]);
+    expect(fetched).toEqual(["large", "large", "large", "large"]);
     expect(sent).not.toContain("i can only read text for now.");
-    await send({ ...text("/export"), entities: [{ type: "bot_command", offset: 0, length: 7 }] }, 5);
+    await send({ ...text("/export"), entities: [{ type: "bot_command", offset: 0, length: 7 }] }, 6);
     expect(exported[0]).toBe("emi-export.json");
-    expect(exported.slice(1)).toEqual([expect.stringMatching(/^emi-image-.+\.png$/), expect.stringMatching(/^emi-image-.+\.png$/)]);
+    expect(exported.slice(1)).toEqual(Array.from({ length: 3 }, () => expect.stringMatching(/^emi-image-.+\.png$/)));
   });
 });
 
