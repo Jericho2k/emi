@@ -94,7 +94,18 @@ function parseReply(data: Record<string, unknown>, web: boolean) {
   return { text: chatText(message.content).trim(), refusal: message.refusal, finish: String(choice.finish_reason ?? "unknown"), truncated: choice.finish_reason === "length", failed: false, citations: citationsFrom(message.annotations) };
 }
 
-export function openRouter(apiKey: string, config: { webEnabled?: boolean } = {}): Llm {
+export interface OpenRouterConfig {
+  webEnabled?: boolean;
+  /**
+   * Preferred providers per model id. A model on OpenRouter is served by
+   * several companies at different prices, and prompt caching only works when
+   * the same one answers every turn. With this, that provider is asked first;
+   * the others remain as fallbacks, so an outage costs a cache miss, not a reply.
+   */
+  providers?: Record<string, string[]>;
+}
+
+export function openRouter(apiKey: string, config: OpenRouterConfig = {}): Llm {
   const webEnabled = config.webEnabled ?? true;
   return {
     capabilities: { web: webEnabled },
@@ -116,7 +127,11 @@ export function openRouter(apiKey: string, config: { webEnabled?: boolean } = {}
       let budget = Math.max(options.maxTokens ?? 1500, 2048);
       let usage: Usage = { model: options.model, inputTokens: 0, outputTokens: 0, costUsd: 0 };
       for (let attempt = 0; attempt < 2; attempt += 1) {
-        const common = { model: options.model, temperature: options.temperature ?? 0.7, reasoning: { effort: "low", exclude: true } };
+        const order = config.providers?.[options.model];
+        const common = {
+          model: options.model, temperature: options.temperature ?? 0.7, reasoning: { effort: "low", exclude: true },
+          ...(order?.length ? { provider: { order, allow_fallbacks: true } } : {}),
+        };
         const body = responses ? {
           ...common, input, max_output_tokens: budget,
           ...(options.json ? { text: { format: { type: "json_object" } } } : {}),

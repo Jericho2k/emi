@@ -3,7 +3,12 @@
  * side-by-side report: every reply, how long it took and what it cost. For
  * choosing EMI_WRITER_MODEL with your own eyes instead of a leaderboard.
  *
- *   OPENROUTER=sk-or-... npx tsx scripts/compare-models.ts [model ...] > report.md
+ *   OPENROUTER=sk-or-... npx tsx scripts/compare-models.ts [model[@provider] ...] > report.md
+ *
+ * "@provider" pins the OpenRouter provider (for example
+ * deepseek/deepseek-v4.1-flash@baidu/fp8), which is what makes caching work;
+ * see EMI_WRITER_PROVIDER. Costs are for a short conversation, so they still
+ * include the first, uncached turn of each scenario.
  *
  * Each model gets its own throwaway database and the same two scenarios:
  * meeting her for the first time, and an established relationship with two
@@ -26,10 +31,10 @@ if (!key) {
 }
 
 const DEFAULT_MODELS = [
-  "deepseek/deepseek-v4.1-flash",
+  "deepseek/deepseek-v4.1-flash@baidu/fp8",
+  "meta/muse-ember@google-vertex/global",
   "openai/gpt-6-luna",
   "anthropic/claude-haiku-5.5",
-  "meta/muse-ember",
   "xiaomi/mimo-v2.6-flash",
   "qwen/qwen3.8-flash",
   "minimax/minimax-m3.1-flash",
@@ -106,10 +111,11 @@ async function freshDb(): Promise<{ db: Db; close: () => Promise<void> }> {
   return { db, close: () => pg.close() };
 }
 
-async function play(model: string, lines: string[], seeded: boolean): Promise<Turn[]> {
+async function play(spec: string, lines: string[], seeded: boolean): Promise<Turn[]> {
   const { db, close } = await freshDb();
   try {
-    const llm = openRouter(key!, { webEnabled: false });
+    const [model, provider] = [spec.split("@")[0]!, spec.split("@")[1]];
+    const llm = openRouter(key!, { webEnabled: false, providers: provider ? { [model]: [provider] } : {} });
     const deps: Deps = {
       db, clock: () => new Date(), random: Math.random, llmFor: () => llm,
       models: { writer: model, utility: "z-ai/glm-5.3-flash", embedding: "qwen/qwen3-embedding-8b" },

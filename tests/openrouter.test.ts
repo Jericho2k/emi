@@ -22,6 +22,17 @@ const payload = (fetch: ReturnType<typeof network>, index = 0) => JSON.parse(fet
 
 afterEach(() => { vi.unstubAllGlobals(); vi.restoreAllMocks(); vi.useRealTimers(); });
 
+describe("OpenRouter provider routing", () => {
+  it("asks the configured provider first for that model only, keeping fallbacks", async () => {
+    const fetch = network(completion("hey"), completion("hey"));
+    const llm = openRouter("key", { providers: { "deepseek/x": ["baidu/fp8"] } });
+    await llm.chat(messages, { model: "deepseek/x" });
+    await llm.chat(messages, { model: "other/y" });
+    expect(payload(fetch).provider).toEqual({ order: ["baidu/fp8"], allow_fallbacks: true });
+    expect(payload(fetch, 1).provider).toBeUndefined();
+  });
+});
+
 describe("OpenRouter reply recovery", () => {
   it("recovers from a reasoning-only response without exposing thinking and accounts for both attempts", async () => {
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});

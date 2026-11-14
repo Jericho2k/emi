@@ -31,6 +31,7 @@ import { tick } from "../src/core/proactive";
 import type { Deps } from "../src/core/types";
 import { getUser, updateUser, userForChannel } from "../src/core/users";
 import { migrate, type Db } from "../src/db";
+import { providerOrder } from "../src/config";
 import { openRouter } from "../src/llm/openrouter";
 
 const key = process.env.OPENROUTER ?? process.env.EMI_SHARED_OPENROUTER_KEY;
@@ -47,11 +48,15 @@ const db: Db = {
 await migrate(db);
 
 let offsetMs = 0;
-const llm = openRouter(key, { webEnabled: process.env.EMI_WEB_ENABLED === "true" });
+const writerModel = process.env.EMI_WRITER_MODEL ?? "deepseek/deepseek-v4.1-flash";
+const llm = openRouter(key, {
+  webEnabled: process.env.EMI_WEB_ENABLED === "true",
+  providers: providerOrder([[writerModel, process.env.EMI_WRITER_PROVIDER ?? (process.env.EMI_WRITER_MODEL ? "" : "baidu/fp8")]]),
+});
 const deps: Deps = {
   db, clock: () => new Date(Date.now() + offsetMs), random: Math.random, llmFor: () => llm,
   models: {
-    writer: process.env.EMI_WRITER_MODEL ?? "deepseek/deepseek-v4.1-flash",
+    writer: writerModel,
     utility: process.env.EMI_UTILITY_MODEL ?? "z-ai/glm-5.3-flash",
     embedding: process.env.EMI_EMBEDDING_MODEL ?? "qwen/qwen3-embedding-8b",
   },
