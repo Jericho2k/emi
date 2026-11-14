@@ -51,7 +51,7 @@ let offsetMs = 0;
 const writerModel = process.env.EMI_WRITER_MODEL ?? "deepseek/deepseek-v4.1-flash";
 const llm = openRouter(key, {
   webEnabled: process.env.EMI_WEB_ENABLED === "true",
-  providers: providerOrder([[writerModel, process.env.EMI_WRITER_PROVIDER ?? (process.env.EMI_WRITER_MODEL ? "" : "baidu/fp8")]]),
+  providers: providerOrder([[writerModel, process.env.EMI_WRITER_PROVIDER ?? (process.env.EMI_WRITER_MODEL ? "" : "baidu/fp8,deepinfra/fp8")]]),
 });
 const deps: Deps = {
   db, clock: () => new Date(Date.now() + offsetMs), random: Math.random, llmFor: () => llm,

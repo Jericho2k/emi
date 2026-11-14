@@ -17,7 +17,7 @@ const Env = z.object({
   EMI_UTILITY_MODEL: z.string().default("z-ai/glm-5.3-flash"),
   EMI_EMBEDDING_MODEL: z.string().default("qwen/qwen3-embedding-8b"),
   // Provider to ask first for each model (OpenRouter endpoint tags, comma-separated).
-  EMI_WRITER_PROVIDER: z.string().default("baidu/fp8"),
+  EMI_WRITER_PROVIDER: z.string().default("baidu/fp8,deepinfra/fp8"),
   EMI_UTILITY_PROVIDER: z.string().optional(),
 });
 
