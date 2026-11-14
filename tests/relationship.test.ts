@@ -311,3 +311,12 @@ describe("wipe", () => {
     expect((await bondSnapshot(w.db, after, w.now)).stage.name).toBe("just met");
   });
 });
+
+describe("who she is", () => {
+  it("is female in every language, and learns their gender instead of guessing it", async () => {
+    const { PERSONA } = await import("../src/core/persona");
+    expect(PERSONA).toContain("Emi is female, always");
+    expect(PERSONA).toContain("не смогла");
+    expect(PERSONA).toContain("Never guess it from their name");
+  });
+});

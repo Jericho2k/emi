@@ -38,7 +38,7 @@ Return one JSON object with these fields:
    "occurred_on": "YYYY-MM-DD" for an event when the day is clear, else null,
    "supersedes": the id (like "m3") of a listed memory this replaces because it changed, else null,
    "storyline": a short lowercase tag if it belongs to an ongoing thread in their life ("job search"), else null}
-  identity = who they are (name, job, city). boundary = something they asked Emi to do or never do. relationship = people in their life. preference = lasting likes and dislikes. state = an ongoing situation that can change (looking for a job, training for a race). event = something that happened on a particular day.
+  identity = who they are (name, job, city, and their gender as soon as it shows: if they state it or speak of themselves with gendered grammar, like "я сходил" or "я устала", keep "Refers to themselves as a man" or "...as a woman", quoting that phrase). boundary = something they asked Emi to do or never do. relationship = people in their life. preference = lasting likes and dislikes. state = an ongoing situation that can change (looking for a job, training for a race). event = something that happened on a particular day.
   Only what they stated. Temporary command probes and integration-test exchanges are not durable personal facts. No guesses, nothing Emi said, no one-off questions they asked, no passwords, keys, card numbers or addresses. Do not repeat a memory that is already listed.
 
 "agenda": things in THEIR FUTURE that Emi should come back to. Each:
