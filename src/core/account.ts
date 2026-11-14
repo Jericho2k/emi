@@ -22,7 +22,7 @@ export interface AccountExport {
 export async function exportAccount(db: Db, userId: string, now: Date): Promise<AccountExport> {
   const one = async (sql: string) => (await db.query(sql, [userId])).rows;
   const [settings] = await one(
-    "select display_name, timezone, timezone_known, initiative, quiet_start, quiet_end, daily_cap_usd, mood, bond, inner_days, mischief, created_at from users where id = $1",
+    "select display_name, timezone, timezone_known, initiative, quiet_start, quiet_end, daily_cap_usd, mood, bond, inner_days, mischief, autonomy, created_at from users where id = $1",
   );
   return {
     exportedAt: now.toISOString(),
@@ -53,7 +53,7 @@ export async function wipeAccount(db: Db, userId: string): Promise<void> {
   await rootDb(db).transaction(async (tx) => {
     // Lock first and invalidate old work in the same atomic deletion.
     await tx.query("update users set conversation_version = conversation_version + 1 where id = $1", [userId]);
-    for (const table of ["agenda_items", "timeline_entries", "arcs", "memories", "messages", "mischief_acts"]) {
+    for (const table of ["agenda_items", "timeline_entries", "arcs", "memories", "messages", "mischief_acts", "pending_actions"]) {
       await tx.query(`delete from ${table} where user_id = $1`, [userId]);
     }
     await tx.query(

@@ -5,6 +5,7 @@ import { telegramInput } from "../src/channels/telegram-input";
 import type { Config } from "../src/config";
 import { decryptKey } from "../src/core/keys";
 import { activeMischief } from "../src/core/expression";
+import { completeConnection } from "../src/core/integrations/connect";
 import { getUser, recentMessages, updateUser } from "../src/core/users";
 import { world } from "./helpers";
 
@@ -248,6 +249,39 @@ describe("Telegram stickers, voice notes and mischief", () => {
     expect(t.methods.some((call) => call.method === "deleteMessage" && call.payload.message_id === pin.payload.message_id)).toBe(true);
     expect(await activeMischief(t.w.db, user.id)).toHaveLength(0);
     expect((await t.user()).mischief).toBe(false);
+  });
+});
+
+describe("Telegram confirmations", () => {
+  it("shows a removal with buttons, and only removes it after the tap", async () => {
+    const t = await setup();
+    const calls: Array<{ method: string; url: string }> = [];
+    const fetch = (async (input: string | URL, init?: RequestInit) => {
+      const url = String(input);
+      calls.push({ method: init?.method ?? "GET", url });
+      const body = url.includes("/token") ? { access_token: "a", refresh_token: "r", expires_in: 3600 }
+        : url.includes("/events") && (init?.method ?? "GET") === "GET" ? { items: [{ id: "real-event-1", summary: "Dentist", start: { dateTime: "2026-11-16T10:30:00+01:00" }, end: { dateTime: "2026-11-16T11:00:00+01:00" } }] }
+          : url.includes("/tasks") ? { items: [] } : {};
+      return new Response(init?.method === "DELETE" ? null : JSON.stringify(body), { status: init?.method === "DELETE" ? 204 : 200 });
+    }) as typeof globalThis.fetch;
+    t.w.deps.integrations = { masterKey: Buffer.alloc(32, 7), publicUrl: "https://emi.example.com", google: { clientId: "g", clientSecret: "s" }, fetch };
+    await t.send("/start");
+    const user = await t.user();
+    await completeConnection(t.w.db, t.w.deps.integrations, "google", user.id, "code", t.w.now);
+    t.w.script = () => 'sure, want me to drop it?\n<<do:{"type":"event.remove","id":"e1"}>>';
+    await t.send("cancel my dentist");
+    await t.send("/agenda");
+    const prompt = t.methods.find((call) => call.method === "sendMessage" && call.payload.reply_markup?.inline_keyboard)!;
+    expect(prompt.payload.text).toBe('📅 remove "Dentist"');
+    expect(calls.some((call) => call.method === "DELETE")).toBe(false);
+    const yes = prompt.payload.reply_markup.inline_keyboard[0][0].callback_data as string;
+
+    const tap = (id: number) => t.telegram.bot.handleUpdate({ update_id: 900 + id, callback_query: { id: `cb${id}`, from: person, chat_instance: "x", data: yes, message: message('📅 remove "Dentist"', { from: botUser, message_id: 777 }) } } as Update);
+    await tap(1);
+    expect(calls.filter((call) => call.method === "DELETE").map((call) => new URL(call.url).pathname)).toEqual(["/calendar/v3/calendars/primary/events/real-event-1"]);
+    expect(t.methods.find((call) => call.method === "editMessageText")?.payload.text).toBe('📅 removed "Dentist"');
+    await tap(2); // a second tap does nothing
+    expect(calls.filter((call) => call.method === "DELETE")).toHaveLength(1);
   });
 });
 

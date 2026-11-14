@@ -2,9 +2,10 @@ import { LlmResponseError } from "../llm/provider";
 import { ProviderError } from "../llm/openrouter";
 import { conversationDeps, ConversationReset, inConversation } from "./conversation";
 import { absorbOnUserMessage, openForWeave, setStatus } from "./agenda/store";
-import { bondSnapshot } from "./bond";
+import { bondSnapshot, currentIrritation } from "./bond";
 import { runExtraction } from "./extraction";
-import { allowance, allowanceLines, permitted, storedExtras } from "./expression";
+import { allowance, allowanceLines, MISCHIEF_FROM_IRRITATION, permitted, recordGesture, storedExtras } from "./expression";
+import { autonomyLine, describeAction, extractActions, holdAction, integrationView, needsOk, resolveActions, runAction } from "./integrations/actions";
 import { ensureInnerDay, onHerMind } from "./inner";
 import { recall } from "./memory/recall";
 import { runConsolidation, timelineFor } from "./memory/timeline";
@@ -23,6 +24,8 @@ export interface TurnResult {
   reaction?: string;
   /** A sticker, voice note or pinned sulk she may send, already checked against today's allowance. */
   extras?: Extras;
+  /** What she did in their accounts this turn, and what waits for their OK. */
+  actions?: { done: string[]; held: Array<{ id: string; summary: string }> };
   turnKind: TurnKind;
   /** Set when no reply could be written; `bubbles` then holds a plain notice. */
   problem?: "no_key" | "key_rejected" | "model_unavailable";
@@ -89,11 +92,17 @@ export async function handleTurn(deps: Deps, userId: string, input: string | Inc
   }
   const recalled = await recall(db, userId, text, queryVector, now);
   const allowed = await allowance(deps, user, now);
+  const view = await integrationView(deps, user, now);
+  const accountLines = view.providers.length ? [
+    ...view.lines, autonomyLine(user.autonomy),
+    "To change anything in their accounts, write the <<do:{...}>> line. Saying it isn't doing it.",
+    ...(allowed.gesture ? ["You may do one small unasked thing in their calendar, to-dos or Spotify (\"gesture\": true). Done while you're annoyed, it's undone when you make up."] : []),
+  ] : view.lines;
 
   const messages = buildTurnMessages({
     user, now, recall: recalled, weave, turnKind, previousUserAt, timeline: await timelineFor(db, user),
     bond: await bondSnapshot(db, user, now), onHerMind: onHerMind(user, now),
-    allowance: allowanceLines(allowed, deps.expression?.voiceTags, text),
+    allowance: [...accountLines, ...allowanceLines(allowed, deps.expression?.voiceTags, text)],
     images, historyImages: await imageHistory(db, userId, history, images, now),
     hasPriorConversation: history.length > 0 || incoming.some((message) => !!message.replyTo),
   }, history, content);
@@ -124,21 +133,48 @@ export async function handleTurn(deps: Deps, userId: string, input: string | Inc
   }
   await recordUsage(db, userId, "reply", reply.usage, now);
 
-  const parsed = parseReply(reply.text, turnKind);
+  const { text: replyText, actions: asked } = extractActions(reply.text);
+  const parsed = parseReply(replyText, turnKind);
   const { extras, asText } = permitted(parsed.extras, allowed);
   const written = [...parsed.bubbles, ...asText];
   // A reaction, a sticker or a voice note can be the whole reply.
-  const wordless = !written.length && !!(parsed.reaction || extras.sticker || extras.voice || extras.pin);
-  const bubbles = attachSources(written.length || wordless ? written : [reply.text.trim()], reply.citations);
+  const wordless = !written.length && !!(parsed.reaction || extras.sticker || extras.voice || extras.pin || asked.length);
+  const bubbles = attachSources(written.length || wordless ? written : [replyText.trim()], reply.citations);
+
+  // What she does in their accounts: gestures and safe changes now, the rest behind a button.
+  const done: string[] = [];
+  const held: Array<{ id: string; summary: string }> = [];
+  const config = deps.integrations;
+  const irritated = currentIrritation(user.bond, now) >= MISCHIEF_FROM_IRRITATION;
+  let gestures = 0;
+  for (const resolved of config ? resolveActions(asked, view, { gestures: !!allowed.gesture }) : []) {
+    if (resolved.gesture && gestures++ > 0) continue;
+    if (!resolved.gesture && needsOk(resolved.action, user.autonomy)) {
+      const summary = describeAction(resolved, user.timezone);
+      held.push({ id: await holdAction(db, userId, resolved, summary, now), summary });
+      continue;
+    }
+    const outcome = await runAction(db, config!, user, resolved, deps.clock);
+    done.push(outcome.text);
+    if (resolved.gesture && outcome.ok && outcome.undo) {
+      // A sulky gesture is undone when she makes up; a sweet one stays, and only counts towards today.
+      await recordGesture(db, userId, outcome.undo, "title" in resolved.action ? resolved.action.title : "", now, !irritated);
+    }
+  }
   for (const [index, item] of weave.entries()) {
     if (parsed.used.includes(agendaLabel(index))) await setStatus(db, item.id, "woven", "brought up in conversation", now);
   }
-  const markers = storedExtras({ ...extras, ...(extras.pin ? { pinned: { text: extras.pin, detail: {} } } : {}) });
+  const markers = [
+    ...storedExtras({ ...extras, ...(extras.pin ? { pinned: { text: extras.pin, detail: {} } } : {}) }),
+    ...done.map((line) => `[did: ${line}]`),
+    ...held.map((item) => `[waiting for their OK: ${item.summary}]`),
+  ];
   await addMessage(db, { userId, role: "emi", content: storedReply(bubbles, parsed.reaction, markers), at: deps.clock() });
 
   return {
     bubbles, turnKind, ...(parsed.reaction ? { reaction: parsed.reaction } : {}),
     ...(Object.keys(extras).length ? { extras } : {}),
+    ...(done.length || held.length ? { actions: { done, held } } : {}),
     recalledIds: [...recalled.standing, ...recalled.relevant, ...recalled.us, ...recalled.self].map((memory) => memory.id),
   };
 }

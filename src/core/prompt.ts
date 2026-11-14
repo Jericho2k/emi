@@ -218,6 +218,8 @@ const PIN_TAG = /<<\s*pin\s*:\s*([^>]{1,200}?)\s*>>/gi;
 const STICKER_LINE = /^\s*\[sent sticker ([^\]\s]{1,16})\]\s*$/gim;
 const VOICE_LINE = /^\s*\[voice note: (.{1,500}?)\]\s*$/gim;
 const PIN_LINE = /^\s*\[pinned: (.{1,200}?)\]\s*$/gim;
+// The app's record of what it did in their accounts. Hers to read, never to write.
+const APP_RECORD = /^\s*\[(?:did|waiting for their OK|tapped [^\]]{0,4} on): [^\n]*\]\s*$/gim;
 
 const REACT_TAG = /<<\s*react\s*:\s*([^>\s]{1,16})\s*>>/gi;
 /** The form a reaction takes in stored history, in case the writer echoes it. */
@@ -260,7 +262,8 @@ export function parseReply(raw: string, turnKind: TurnKind): ParsedReply {
   }).replace(REACT_TAG, react).replace(REACTED_LINE, react)
     .replace(STICKER_TAG, take("sticker")).replace(STICKER_LINE, take("sticker"))
     .replace(VOICE_TAG, take("voice")).replace(VOICE_LINE, take("voice"))
-    .replace(PIN_TAG, take("pin")).replace(PIN_LINE, take("pin"));
+    .replace(PIN_TAG, take("pin")).replace(PIN_LINE, take("pin"))
+    .replace(APP_RECORD, "");
   const asked = Object.keys(extras).length > 0;
   const result = (parsed: Omit<ParsedReply, "used" | "reaction" | "extras">): ParsedReply => {
     // She meant to only react, with an emoji no channel allows: the plainest one

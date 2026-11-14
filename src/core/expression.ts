@@ -7,6 +7,7 @@ import { PERSONA } from "./persona";
 import { joinBubbles, parseReply, renderHistory } from "./prompt";
 import type { Deps, Extras, MischiefAct, Outbound, SentExtras, User } from "./types";
 import { addMessage, getUser, recentMessages, recordUsage } from "./users";
+import { undoGesture } from "./integrations/actions";
 
 /**
  * WHAT SHE SENDS BESIDES WORDS.
@@ -70,6 +71,8 @@ export interface Allowance {
   stickers: string[];
   voice: boolean;
   pin: boolean;
+  /** One small unasked thing in their calendar, to-dos or Spotify. */
+  gesture?: boolean;
 }
 
 /** What she may send right now. Computed in code; the writer only sees the result. */
@@ -77,9 +80,11 @@ export async function allowance(deps: Deps, user: User, now: Date): Promise<Allo
   const kit = deps.expression;
   const stickers = kit && (await sentToday(deps.db, user, now, "[sent sticker ")) < STICKERS_PER_DAY ? kit.stickers() : [];
   const voice = !!kit?.speak && (await sentToday(deps.db, user, now, "[voice note: ")) < VOICE_PER_DAY;
-  const pin = user.mischief && currentIrritation(user.bond, now) >= MISCHIEF_FROM_IRRITATION
-    && !(await activeMischief(deps.db, user.id)).length && (await mischiefToday(deps.db, user, now)) < MISCHIEF_PER_DAY;
-  return { stickers, voice, pin };
+  const underCap = user.mischief && (await mischiefToday(deps.db, user, now)) < MISCHIEF_PER_DAY;
+  const pin = underCap && currentIrritation(user.bond, now) >= MISCHIEF_FROM_IRRITATION && !(await activeMischief(deps.db, user.id)).some((act) => act.kind === "pin");
+  // Unasked changes contradict "ask before every change", so none at that level.
+  const gesture = underCap && user.autonomy !== "ask" && !!deps.integrations;
+  return { stickers, voice, pin, gesture };
 }
 
 /** Moments people answer with a sticker or a voice note, spotted in their message. */
@@ -140,6 +145,31 @@ export function storedExtras(sent: SentExtras): string[] {
   ];
 }
 
+/** A gesture made while annoyed, to be deleted when she makes up. */
+export async function recordGesture(db: Db, userId: string, undo: { kind: "event" | "task"; id: string }, text: string, now: Date, keep = false): Promise<void> {
+  // A sweet gesture is born undone: it counts towards today's cap and stays where she put it.
+  await db.query(
+    "insert into mischief_acts (user_id, kind, detail, created_at, undone_at) values ($1, $2, $3::jsonb, $4, $5)",
+    [userId, undo.kind, JSON.stringify({ id: undo.id, text }), now, keep ? now : null],
+  );
+}
+
+/** Mischief done in the channel (a pin) or in their accounts (a gesture) is undone where it was done. */
+async function undoAct(deps: Deps, user: User | null, outbound: Outbound, act: MischiefAct): Promise<void> {
+  try {
+    if (act.kind === "pin") await outbound.undo?.(act.userId, act);
+    else if (user) await undoGesture(deps, user, { kind: act.kind, id: String(act.detail.id ?? "") });
+  } catch (error) {
+    console.warn("[mischief] undo failed", error instanceof Error ? error.message : error);
+  }
+}
+
+const doneThing = (act: MischiefAct) => {
+  const text = String(act.detail.text ?? "");
+  return act.kind === "pin" ? `pinned "${text}" in your chat` : act.kind === "task" ? `put the to-do "${text}" on their list` : `put "${text}" in their calendar`;
+};
+const undoneThing = (act: MischiefAct) => (act.kind === "pin" ? "unpinned it" : "took it out again");
+
 export async function recordMischief(db: Db, userId: string, sent: SentExtras, now: Date): Promise<void> {
   if (!sent.pinned) return;
   await db.query(
@@ -156,8 +186,9 @@ async function markUndone(db: Db, act: MischiefAct, now: Date): Promise<void> {
 export async function undoAll(deps: Deps, userId: string, outbound: Outbound): Promise<number> {
   const now = deps.clock();
   let undone = 0;
+  const user = await getUser(deps.db, userId);
   for (const act of await activeMischief(deps.db, userId)) {
-    await outbound.undo?.(userId, act).catch((error) => console.warn("[mischief] undo failed", error instanceof Error ? error.message : error));
+    await undoAct(deps, user, outbound, act);
     await markUndone(deps.db, act, now);
     undone += 1;
   }
@@ -172,8 +203,8 @@ async function makeupLine(deps: Deps, user: User, act: MischiefAct, now: Date): 
   const notes = [
     "<notes>", "Private notes for you. They cannot see these.",
     `Now, where they are: ${describeMoment(now, user.timezone)}.`,
-    `Earlier, annoyed with them, you pinned "${String(act.detail.text ?? "")}" in your chat. You've cooled down and just unpinned it.`,
-    "Tell them in one short line, your voice: you're over it, maybe a little grudgingly. No apology essay, no explaining the pin.",
+    `Earlier, annoyed with them, you ${doneThing(act)}. You've cooled down and just ${undoneThing(act)}.`,
+    "Tell them in one short line, your voice: you're over it, maybe a little grudgingly. No apology essay, no explaining what you did.",
     "</notes>",
   ].join("\n");
   const last = messages[messages.length - 1];
@@ -219,7 +250,7 @@ export async function sweepMakeups(deps: Deps, outbound: Outbound): Promise<numb
       await checkConversation(deps.db);
       await conversationEffect(deps.db, async () => {
         for (const act of acts) {
-          await outbound.undo?.(userId, act).catch((error) => console.warn("[mischief] undo failed", error instanceof Error ? error.message : error));
+          await undoAct(deps, user, outbound, act);
           await markUndone(deps.db, act, now);
         }
         if (line) {

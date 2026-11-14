@@ -33,6 +33,7 @@ export function userFromRow(row: Row): User {
     innerDays: Array.isArray(json(row.inner_days)) ? json(row.inner_days) : [],
     lastSpontaneousAt: toDate(row.last_spontaneous_at),
     mischief: row.mischief ?? true,
+    autonomy: row.autonomy ?? "normal",
     encryptedApiKey: row.encrypted_api_key ?? null,
     lastUserMessageAt: toDate(row.last_user_message_at),
     lastEmiMessageAt: toDate(row.last_emi_message_at),
@@ -80,7 +81,7 @@ const SETTABLE: Record<string, string> = {
   quietEnd: "quiet_end", dailyCapUsd: "daily_cap_usd", encryptedApiKey: "encrypted_api_key",
   lastUserMessageAt: "last_user_message_at", lastEmiMessageAt: "last_emi_message_at",
   extractedThrough: "extracted_through", consolidatedThrough: "consolidated_through", lastPlannedOn: "last_planned_on",
-  lastSpontaneousAt: "last_spontaneous_at", mischief: "mischief",
+  lastSpontaneousAt: "last_spontaneous_at", mischief: "mischief", autonomy: "autonomy",
 };
 const JSON_COLUMNS: Record<string, string> = { mood: "mood", bond: "bond", innerDays: "inner_days" };
 

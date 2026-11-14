@@ -3,6 +3,7 @@ import { decryptKey, parseMasterKey } from "./core/keys";
 import type { Models, User } from "./core/types";
 import { openRouter } from "./llm/openrouter";
 import type { VoiceConfig } from "./core/voice";
+import type { IntegrationsConfig } from "./core/integrations/connect";
 import type { Llm } from "./llm/provider";
 
 const Env = z.object({
@@ -26,6 +27,14 @@ const Env = z.object({
   ELEVENLABS_API_KEY: z.string().optional(),
   EMI_VOICE_ID: z.string().optional(),
   EMI_TTS_MODEL: z.string().default("eleven_v4"),
+  // Integrations. PUBLIC_URL is where this server is reachable (Railway: the
+  // service's public domain); Google and Spotify send people back there.
+  PUBLIC_URL: z.string().url().optional(),
+  PORT: z.coerce.number().int().default(8080),
+  GOOGLE_CLIENT_ID: z.string().optional(),
+  GOOGLE_CLIENT_SECRET: z.string().optional(),
+  SPOTIFY_CLIENT_ID: z.string().optional(),
+  SPOTIFY_CLIENT_SECRET: z.string().optional(),
 });
 
 export interface Config {
@@ -40,6 +49,9 @@ export interface Config {
   stickerPacks?: string[];
   /** Her voice, when configured. */
   voice?: VoiceConfig;
+  /** Calendar, to-dos and music, when PUBLIC_URL and at least one app are set. */
+  integrations?: IntegrationsConfig;
+  port?: number;
   /** Providers to ask first, per model id. See OpenRouterConfig. */
   providers?: Record<string, string[]>;
   /** Type chat replies at a human pace. Off unless set, so tests never wait. */
@@ -66,9 +78,19 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     voice: e.ELEVENLABS_API_KEY?.trim() && e.EMI_VOICE_ID?.trim()
       ? { apiKey: e.ELEVENLABS_API_KEY.trim(), voiceId: e.EMI_VOICE_ID.trim(), model: e.EMI_TTS_MODEL }
       : undefined,
+    port: e.PORT,
+    integrations: integrationsFrom(e),
     providers: providerOrder([[e.EMI_WRITER_MODEL, e.EMI_WRITER_PROVIDER], [e.EMI_UTILITY_MODEL, e.EMI_UTILITY_PROVIDER]]),
     models: { writer: e.EMI_WRITER_MODEL, vision: e.EMI_VISION_MODEL?.trim() || e.EMI_WRITER_MODEL, utility: e.EMI_UTILITY_MODEL, embedding: e.EMI_EMBEDDING_MODEL },
   };
+}
+
+function integrationsFrom(e: z.infer<typeof Env>): IntegrationsConfig | undefined {
+  const app = (id?: string, secret?: string) => (id?.trim() && secret?.trim() ? { clientId: id.trim(), clientSecret: secret.trim() } : undefined);
+  const google = app(e.GOOGLE_CLIENT_ID, e.GOOGLE_CLIENT_SECRET);
+  const spotify = app(e.SPOTIFY_CLIENT_ID, e.SPOTIFY_CLIENT_SECRET);
+  if (!e.PUBLIC_URL || (!google && !spotify)) return undefined;
+  return { masterKey: parseMasterKey(e.EMI_MASTER_KEY), publicUrl: e.PUBLIC_URL, ...(google ? { google } : {}), ...(spotify ? { spotify } : {}) };
 }
 
 /** Model id to provider order. A blank provider means OpenRouter chooses. */
