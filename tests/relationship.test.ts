@@ -311,3 +311,40 @@ describe("wipe", () => {
     expect((await bondSnapshot(w.db, after, w.now)).stage.name).toBe("just met");
   });
 });
+
+describe("their gender", () => {
+  it("is kept once from their own words, in their language, and replaced if it changes", async () => {
+    const w = await world();
+    const person = await w.newUser();
+    const mine = async () => (await activeMemories(w.db, person.id)).map((m) => m.content);
+    await handleTurn(w.deps, person.id, "вчера сходил к барберу, я так устал");
+    w.script = byModel({ utility: JSON.stringify({ gender: { value: "woman", evidence: "я так устала" } }) });
+    await runExtraction(w.deps, person.id);
+    expect(await mine()).toEqual([]); // the quote is not theirs
+
+    await handleTurn(w.deps, person.id, "я сходил постричься");
+    w.script = byModel({ utility: JSON.stringify({ gender: { value: "man", evidence: "я сходил" } }) });
+    await runExtraction(w.deps, person.id);
+    await handleTurn(w.deps, person.id, "я опять сходил");
+    await runExtraction(w.deps, person.id);
+    expect(await mine()).toEqual(["Мужчина, говорит о себе в мужском роде"]); // once, in Russian
+
+    w.script = () => "ok";
+    await handleTurn(w.deps, person.id, "привет");
+    expect(lastNotes(w)).toContain("Мужчина, говорит о себе в мужском роде");
+
+    await handleTurn(w.deps, person.id, "вообще-то я девушка, опечаталась");
+    w.script = byModel({ utility: JSON.stringify({ gender: { value: "woman", evidence: "я девушка" } }) });
+    await runExtraction(w.deps, person.id);
+    expect(await mine()).toEqual(["Женщина, говорит о себе в женском роде"]);
+  });
+});
+
+describe("who she is", () => {
+  it("is female in every language, and learns their gender instead of guessing it", async () => {
+    const { PERSONA } = await import("../src/core/persona");
+    expect(PERSONA).toContain("Emi is female, always");
+    expect(PERSONA).toContain("не смогла");
+    expect(PERSONA).toContain("Never guess it from their name");
+  });
+});

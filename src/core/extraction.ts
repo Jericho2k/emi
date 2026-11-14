@@ -33,12 +33,12 @@ Return one JSON object with these fields:
 
 "memories": durable things THE PERSON said about themselves or their life. Each:
   {"kind": "identity" | "boundary" | "relationship" | "preference" | "state" | "event",
-   "content": one plain sentence that stands on its own, in the language they used, with the concrete details kept. Refer to the person as "they"; never write their own name as the subject,
+   "content": one plain sentence that stands on its own, in the language they used, with the concrete details kept. Write it as a native speaker would jot a note about someone: in English with "they"; in languages that can drop the pronoun, drop it ("Зовут Рустам", "Работает бэкенд-разработчиком"), never a literal "they" ("Их зовут"). Leave dates out of the sentence: the day goes in "occurred_on". Never write their own name as the subject,
    "evidence": an EXACT quote copied from one of their messages,
    "occurred_on": "YYYY-MM-DD" for an event when the day is clear, else null,
    "supersedes": the id (like "m3") of a listed memory this replaces because it changed, else null,
    "storyline": a short lowercase tag if it belongs to an ongoing thread in their life ("job search"), else null}
-  identity = who they are (name, job, city). boundary = something they asked Emi to do or never do. relationship = people in their life. preference = lasting likes and dislikes. state = an ongoing situation that can change (looking for a job, training for a race). event = something that happened on a particular day.
+  identity = who they are (name, job, city; their gender has its own field below). boundary = something they asked Emi to do or never do. relationship = people in their life. preference = lasting likes and dislikes. state = an ongoing situation that can change (looking for a job, training for a race). event = something that happened on a particular day.
   Only what they stated. Temporary command probes and integration-test exchanges are not durable personal facts. No guesses, nothing Emi said, no one-off questions they asked, no passwords, keys, card numbers or addresses. Do not repeat a memory that is already listed.
 
 "agenda": things in THEIR FUTURE that Emi should come back to. Each:
@@ -79,7 +79,9 @@ Return one JSON object with these fields:
 
 "timezone": an IANA timezone like "Europe/Berlin" if they stated where they live or are right now, else null.
 
-"display_name": what they asked to be called, if they said so, else null.`;
+"display_name": what they asked to be called, if they said so, else null.
+
+"gender": when they state their gender or speak of themselves with gendered grammar ("я сходил", "я устал" is a man; "я сходила", "я устала" a woman), {"value": "man" | "woman", "evidence": an EXACT quote of those words}. Report it whenever it shows in these messages, unless a stored memory already says the same. Never from their name. Else null.`;
 
 const text = (max: number) => z.string().trim().min(1).max(max);
 const MemorySchema = z.object({
@@ -219,6 +221,8 @@ async function extract(deps: Deps, userId: string, hintIds: string[]): Promise<E
     await updateUser(db, userId, { displayName: data.display_name.trim() });
   }
 
+  await applyGender(deps, user, data.gender, source, last.id, now, summary);
+
   const quotedBy = (text: string) => (item: { evidence: string }) => evidenceIsExact(item.evidence, text);
   await applyMemories(deps, user, list(MemorySchema, data.memories, 6).filter(quotedBy(source)), memoryLabels, last.id, now, summary);
   const shared = list(SharedSchema, data.emi_memories, 3)
@@ -253,6 +257,37 @@ async function extract(deps: Deps, userId: string, hintIds: string[]): Promise<E
     await updateUser(db, userId, { mood: { label: mood.label, reason: typeof mood.reason === "string" ? mood.reason.slice(0, 80) : undefined, at: now.toISOString() } });
   }
   return done();
+}
+
+/** The stored note for each gender, in English and in Russian, so /memory reads in their language. */
+export const GENDER_NOTES = {
+  man: { en: "Is a man: speaks of himself in the masculine", ru: "Мужчина, говорит о себе в мужском роде" },
+  woman: { en: "Is a woman: speaks of herself in the feminine", ru: "Женщина, говорит о себе в женском роде" },
+} as const;
+const GenderSchema = z.object({ value: z.enum(["man", "woman"]), evidence: text(200) });
+
+/**
+ * Their gender, from their own words only, kept as one identity memory that
+ * every turn carries. A new statement that differs replaces the old note,
+ * unless they wrote or pinned it themselves.
+ */
+async function applyGender(deps: Deps, user: User, proposed: unknown, source: string, sourceMessageId: number, now: Date, summary: ExtractionSummary): Promise<void> {
+  const parsed = GenderSchema.safeParse(proposed);
+  if (!parsed.success || !evidenceIsExact(parsed.data.evidence, source)) return;
+  const known = Object.values(GENDER_NOTES).flatMap((note) => [note.en, note.ru] as string[]);
+  const existing = (await activeMemories(deps.db, user.id)).find((memory) => known.includes(memory.content));
+  const notes = GENDER_NOTES[parsed.data.value];
+  if (existing && [notes.en, notes.ru].includes(existing.content as never)) return;
+  if (existing && (existing.pinned || existing.source === "user")) return;
+  const stored = await insertMemory(deps.db, {
+    userId: user.id, kind: "identity", content: /[а-яё]/i.test(source) ? notes.ru : notes.en,
+    evidence: parsed.data.evidence, sourceMessageId, at: now,
+  });
+  summary.memoriesAdded += 1;
+  if (existing) {
+    await supersedeMemory(deps.db, user.id, existing.id, stored.id, now);
+    summary.memoriesSuperseded += 1;
+  }
 }
 
 interface ProposedMemory {
