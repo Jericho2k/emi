@@ -121,11 +121,34 @@ turn, with an 8 MB limit per image and 16 MB total. A text reply to an older
 Telegram picture reattaches that picture's pixels with its original caption
 and reply context, even if it is outside the recent history window.
 
-Follow-up questions automatically include up to two of the most recent images
-within the recent conversation window, subject to the same total limits.
-Current images take priority. Older image placeholders and timeline summaries
-contain no pixels; reply to or resend the original to inspect it again.
-The writer receives actual image parts, not only a generated OCR summary.
+### How images are kept cheap
+
+Image tokens are the expensive part of an image conversation, so pixels are
+sent only while they are likely to matter:
+
+1. **Shrunk once on arrival.** Each new image is resized to at most 1.6
+   megapixels (2048 px on the longest side), which is at or above what vision
+   models downscale to internally, so no detail the model would see is lost.
+   Screenshots and graphics stay lossless PNG; photos become high-quality JPEG.
+   EXIF rotation is applied and metadata (including GPS) is dropped. The
+   shrunk copy is what is stored, replayed and exported. For Telegram photos
+   the smallest size that still reaches this budget is downloaded.
+2. **Described once, after the reply.** In the background, the vision model
+   looks at each new picture once more and writes a detailed description,
+   including a verbatim transcription of any legible text. This is recorded in
+   `/usage` as `describe_image`.
+3. **Pixels while the picture is the topic, then the description.** Follow-ups
+   carry the picture's pixels for the next two replies, within 15 minutes.
+   After that, the stored description stands in for it and the normal writer
+   model is used. If a question needs a detail the description does not
+   settle, Emi asks you to reply to the picture, which attaches it again.
+   Pictures with no description yet (still being written, or failed twice)
+   fall back to replaying at most two recent images.
+4. **No duplicates.** Replying to a picture Emi already has, or sending the
+   same Telegram file again, uses the stored copy: nothing is downloaded and
+   no second copy of the bytes is stored.
+
+Older image placeholders and timeline summaries contain no pixels.
 Extraction, timeline consolidation and proactive jobs see textual attachment
 markers and the conversation, without reprocessing image pixels or treating
 visual guesses as facts explicitly stated by you.
@@ -159,9 +182,14 @@ it. IPv4 is scoped to these downloads because Railway's
 Image bytes are stored separately from text history in the private
 `message_images` table, with owner-scoped loading and Row Level Security for
 the Supabase Data API. `/wipe` deletes those bytes along with messages.
-`/export` sends the JSON manifest and each original image as a separate file,
-loading one image at a time so the archive does not become a huge base64 JSON
-upload. Migration `0004_message_images.sql` runs automatically at startup.
+`/export` sends the JSON manifest (including each picture's stored
+description) and each stored image once as a separate file, loading one image
+at a time so the archive does not become a huge base64 JSON upload; a reply
+that reused a picture is listed with its `source_image_id`. Migrations
+`0004_message_images.sql` and `0005_image_reuse.sql` run automatically at
+startup. Only pictures from the last 24 hours are described, so
+images stored before `0005` are not described retroactively; they keep the
+bounded pixel replay.
 
 Provider format: [OpenRouter image inputs](https://openrouter.ai/docs/guides/overview/multimodal/image-understanding).
 

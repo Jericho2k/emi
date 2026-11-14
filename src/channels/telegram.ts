@@ -4,7 +4,8 @@ import type { Config } from "../config";
 import { exportAccount, wipeAccount } from "../core/account";
 import { pendingItems } from "../core/agenda/store";
 import { describeMoment, isValidTimeZone } from "../core/clock";
-import { ImageInputError, MAX_TURN_IMAGES, loadImages, validateImages } from "../core/images";
+import { describeImages } from "../core/image-descriptions";
+import { ImageInputError, MAX_TURN_IMAGES, findStoredImage, loadImages, validateImages } from "../core/images";
 import { encryptKey } from "../core/keys";
 import { activeMemories, deleteMemory, findByShortId, insertMemory } from "../core/memory/store";
 import { afterTurn, handleTurn } from "../core/pipeline";
@@ -228,10 +229,11 @@ export function createTelegram(deps: Deps, config: Config): { bot: Bot; outbound
     const images = data.images;
     const suffix: Record<string, string> = { "image/png": "png", "image/jpeg": "jpg", "image/webp": "webp", "image/gif": "gif" };
     const filename = (image: Pick<typeof images[number], "id" | "mime_type">) => `emi-image-${image.id}.${suffix[image.mime_type]}`;
-    const manifest = { ...data, images: images.map((image) => ({ ...image, file: filename(image) })) };
+    const manifest = { ...data, images: images.map((image) => ({ ...image, file: image.source_image_id ? null : filename(image) })) };
     await ctx.replyWithDocument(new InputFile(Buffer.from(JSON.stringify(manifest, null, 2)), "emi-export.json"));
-    for (const image of images) {
-      const [original] = await loadImages(deps.db, user.id, [{ id: image.id, mimeType: image.mime_type, byteSize: image.byte_size }]);
+    // A re-sent or replied-to picture reuses a stored copy; its file is exported once.
+    for (const image of images.filter((image) => !image.source_image_id)) {
+      const [original] = await loadImages(deps.db, user.id, [image]);
       if (!original) throw new Error("export image is no longer available");
       await ctx.replyWithDocument(new InputFile(original.data, filename(image)));
     }
@@ -276,7 +278,7 @@ export function createTelegram(deps: Deps, config: Config): { bot: Bot; outbound
       if (fileCount > MAX_TURN_IMAGES) throw new ImageInputError(`send up to ${MAX_TURN_IMAGES} images at once.`);
       const messages: IncomingMessage[] = [];
       for (const item of batch) {
-        messages.push(await telegramImages(bot.api, config.telegramToken, item.message, item.input));
+        messages.push(await telegramImages(bot.api, config.telegramToken, item.message, item.input, (key) => findStoredImage(deps.db, userId, key)));
         validateImages(messages.flatMap((message) => message.images ?? []));
       }
       const result = await handleTurn(deps, userId, messages);
@@ -284,7 +286,12 @@ export function createTelegram(deps: Deps, config: Config): { bot: Bot; outbound
       const last = batch.at(-1)?.message;
       if (result.reaction && last) await react(chatId, last.message_id, result.reaction, result.bubbles.length > 0);
       await sendBubbles(chatId, result.bubbles, paced ? bubbleWaits(result.bubbles, Date.now() - started, deps.random) : undefined);
-      if (!result.problem) void afterTurn(deps, userId, result).catch((error) => console.warn("[background]", error));
+      if (!result.problem) {
+        void afterTurn(deps, userId, result).catch((error) => console.warn("[background]", error));
+        // Written while the person reads the reply, ready before the picture
+        // stops being attached to follow-ups.
+        void describeImages(deps, userId).catch((error) => console.warn("[background]", error));
+      }
     } catch (error) {
       if (error instanceof ImageInputError) {
         for (const item of batch) await addMessage(deps.db, { userId, role: "user", content: item.input.text || "[Image upload unavailable]", replyTo: item.input.replyTo, at: deps.clock() });

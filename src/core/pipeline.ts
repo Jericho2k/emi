@@ -8,6 +8,7 @@ import { recall } from "./memory/recall";
 import { runConsolidation, timelineFor } from "./memory/timeline";
 import { agendaLabel, buildTurnMessages, classifyTurn, historyWindow, parseReply, storedReply, type TurnKind } from "./prompt";
 import { imageHistory, validateImages, VISION_CONTEXT } from "./images";
+import { prepareImages } from "./image-prep";
 import { messageContent } from "./message";
 import type { Deps, IncomingMessage } from "./types";
 import { attachSources, webContext } from "./web";
@@ -41,8 +42,12 @@ const SETTINGS: Record<TurnKind, { temperature: number; maxTokens: number }> = {
  * execution. Memory extraction still happens after the reply.
  */
 export async function handleTurn(deps: Deps, userId: string, input: string | IncomingMessage[]): Promise<TurnResult> {
-  const incoming = typeof input === "string" ? [{ text: input }] : input;
-  if (!incoming.length) throw new Error("a turn needs at least one message");
+  const raw = typeof input === "string" ? [{ text: input }] : input;
+  if (!raw.length) throw new Error("a turn needs at least one message");
+  validateImages(raw.flatMap((message) => message.images ?? []));
+  // Shrunk once here, so storage and every later replay use the smaller copy.
+  const incoming: IncomingMessage[] = [];
+  for (const message of raw) incoming.push(message.images?.length ? { ...message, images: await prepareImages(message.images) } : message);
   const images = incoming.flatMap((message) => message.images ?? []);
   validateImages(images);
   const text = incoming.map((message) => message.text).join("\n");
@@ -82,7 +87,7 @@ export async function handleTurn(deps: Deps, userId: string, input: string | Inc
   const messages = buildTurnMessages({
     user, now, recall: recalled, weave, turnKind, previousUserAt, timeline: await timelineFor(db, user),
     bond: await bondSnapshot(db, user, now), onHerMind: onHerMind(user, now),
-    images, historyImages: await imageHistory(db, userId, history, images),
+    images, historyImages: await imageHistory(db, userId, history, images, now),
     hasPriorConversation: history.length > 0 || incoming.some((message) => !!message.replyTo),
   }, history, content);
   messages[0]!.content += `\n\n${webContext(!!llm.capabilities?.web)}\n\n${VISION_CONTEXT}`;

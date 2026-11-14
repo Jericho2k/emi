@@ -121,19 +121,32 @@ export async function addMessage(db: Db, input: { userId: string; role: "user" |
   const images = input.images ?? [];
   validateImages(images);
   if (images.length && input.role !== "user") throw new Error("only incoming messages may attach images");
-  // One statement makes the message and its images atomic on a pooled DB.
+  // One statement makes the message and its images atomic on a pooled DB. A
+  // picture already stored for this person is referenced, not copied; the
+  // ownership check is part of the insert.
   const { rows } = await db.query<Row>(
     `with message as (
        insert into messages (user_id, role, content, kind, agenda_item_id, created_at, reply_context)
        values ($1, $2, $3, $4, $5, $6, $7::jsonb) returning *
      ), images as (
-       insert into message_images (message_id, position, mime_type, origin, data)
-       select message.id, image.position, image.mime_type, image.origin, decode(image.data, 'base64')
-       from message, jsonb_to_recordset($8::jsonb) as image(position int, mime_type text, origin text, data text)
-       returning id, mime_type, origin, position, octet_length(data) as byte_size
-     ) select message.*, (select jsonb_agg(jsonb_build_object('id', id, 'mimeType', mime_type, 'byteSize', byte_size, 'origin', origin) order by position) from images) as images from message`,
+       insert into message_images (message_id, position, mime_type, origin, data, source_key, source_image_id)
+       select message.id, image.position, image.mime_type, image.origin,
+         case when image.stored_id is null then decode(image.data, 'base64') end, image.source_key, owned.id
+       from message cross join jsonb_to_recordset($8::jsonb) as image(position int, mime_type text, origin text, data text, source_key text, stored_id uuid)
+       left join lateral (
+         select s.id from message_images s join messages m on m.id = s.message_id
+         where s.id = image.stored_id and m.user_id = $1 and s.data is not null
+       ) owned on true
+       returning id, mime_type, origin, position, source_image_id, octet_length(data) as byte_size
+     ) select message.*, (select jsonb_agg(jsonb_build_object(
+         'id', i.id, 'sourceId', coalesce(i.source_image_id, i.id), 'mimeType', i.mime_type,
+         'byteSize', coalesce(i.byte_size, octet_length(s.data)), 'origin', i.origin, 'description', s.description
+       ) order by i.position) from images i left join message_images s on s.id = i.source_image_id) as images from message`,
     [input.userId, input.role, input.content, input.kind ?? "reply", input.agendaItemId ?? null, input.at, input.replyTo ? JSON.stringify(input.replyTo) : null,
-      JSON.stringify(images.map((image, position) => ({ position, mime_type: image.mimeType, origin: image.origin ?? null, data: Buffer.from(image.data).toString("base64") })))],
+      JSON.stringify(images.map((image, position) => ({
+        position, mime_type: image.mimeType, origin: image.origin ?? null, source_key: image.sourceKey ?? null, stored_id: image.storedId ?? null,
+        data: image.storedId ? null : Buffer.from(image.data).toString("base64"),
+      })))],
   );
   await updateUser(db, input.userId, input.role === "user" ? { lastUserMessageAt: input.at } : { lastEmiMessageAt: input.at });
   return messageFromRow(rows[0]!);
