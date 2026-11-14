@@ -3,6 +3,7 @@ import { createTelegram } from "./channels/telegram";
 import { llmResolver, loadConfig } from "./config";
 import { tick } from "./core/proactive";
 import { elevenLabs, supportsAudioTags } from "./core/voice";
+import { startHttp } from "./http";
 import type { Deps } from "./core/types";
 import { migrate, pgDb } from "./db";
 
@@ -36,8 +37,11 @@ async function main() {
     speak: config.voice ? elevenLabs(config.voice) : undefined,
     voiceTags: config.voice ? supportsAudioTags(config.voice.model) : false,
   };
+  deps.integrations = config.integrations;
+  // Google and Spotify send people back here after they approve access.
+  startHttp({ port: config.port ?? 8080, db, integrations: config.integrations, clock: deps.clock, onConnected: telegram.announceConnection });
   const stickerCount = await telegram.loadStickers();
-  console.log(`[emi] ${stickerCount} stickers, ${telegram.stickerEmoji().length} moods; voice ${config.voice ? "on" : "off"}`);
+  console.log(`[emi] ${stickerCount} stickers, ${telegram.stickerEmoji().length} moods; voice ${config.voice ? "on" : "off"}; integrations ${config.integrations ? [config.integrations.google && "google", config.integrations.spotify && "spotify"].filter(Boolean).join("+") : "off"}`);
 
   let ticking = false;
   const timer = setInterval(async () => {
@@ -67,6 +71,8 @@ async function main() {
     { command: "agenda", description: "What I'm planning to bring up" },
     { command: "initiative", description: "How often I write first" },
     { command: "mischief", description: "Whether I may sulk in our chat" },
+    { command: "connect", description: "Link your calendar, to-dos or Spotify" },
+    { command: "autonomy", description: "How much I do without asking" },
     { command: "usage", description: "What today has cost" },
     { command: "help", description: "Everything you can control" },
   ]);

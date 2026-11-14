@@ -71,6 +71,9 @@ The key is read from the environment only. Never put it in a file in this reposi
 | `/forget <id>` | Remove one memory. The text is erased, not hidden. |
 | `/agenda` | What she plans to bring up, and when. |
 | `/initiative off\|low\|medium\|high` | How often she writes first. |
+| `/connect google\|spotify` | Link your Google calendar and to-dos, or Spotify. A sign-in link that works for 15 minutes, only for you. |
+| `/disconnect google\|spotify` | Take that access back. |
+| `/autonomy ask\|normal\|auto` | How much she does in your accounts without asking. `normal` (default): adding and ticking off just happen, moving or removing waits for a tap. |
 | `/mischief on\|off` | Whether she may pin a sulky status in your chat when you've annoyed her. On by default; she takes it down herself. |
 | `/timezone <Area/City>` | Where you are. Telling her your city in chat works too. |
 | `/quiet <from> <to>` | Hours she stays silent. |
@@ -313,6 +316,22 @@ composition cannot start sending afterward. Migration
 `0007_conversation_version.sql` applies automatically at startup.
 
 One limit to know: `/forget` erases a memory, but a chapter summary written earlier may still mention the same fact. `/wipe` erases everything.
+
+## Calendar, to-dos and Spotify
+
+Each person connects their own accounts with `/connect`. Her notes then hold their next 7 days and open to-dos with short ids, and she acts by writing `<<do:{...}>>` lines that code checks and runs (`src/core/integrations/`). She can add, move and remove events, add, tick off and remove to-dos, and make private Spotify playlists. What needs a tap depends on `/autonomy`. Events never get attendees and playlists are private, so nothing she does reaches another person. With `/mischief` on she may also do one small unasked thing (a to-do "apologise to emi", a ❤ on your morning): only ever an addition, and when she did it while annoyed she deletes it again once she has made up.
+
+One-time setup:
+
+1. **A public address.** In Railway, open the service, then Settings, Networking, and generate a domain. Set `PUBLIC_URL` to it (`https://...`). Railway sets `PORT` itself.
+2. **Google** (calendar and to-dos):
+   - In [Google Cloud Console](https://console.cloud.google.com), create a project and enable the **Google Calendar API** and the **Google Tasks API**.
+   - Set up the OAuth consent screen: user type External, the scopes `calendar.events` and `tasks`, and add the Google accounts allowed to connect as test users.
+   - Create an OAuth client of type **Web application** with the redirect URI `PUBLIC_URL/oauth/google`. Put its ID and secret in `GOOGLE_CLIENT_ID` and `GOOGLE_CLIENT_SECRET`.
+   - While the app is in Testing, only those test users can connect, and Google ends their access after 7 days (they `/connect` again). Opening it to everyone needs Google's verification, because calendar access is a sensitive scope.
+3. **Spotify:** in the [Spotify developer dashboard](https://developer.spotify.com/dashboard), create an app using the Web API, with the redirect URI `PUBLIC_URL/oauth/spotify`. Put its ID and secret in `SPOTIFY_CLIENT_ID` and `SPOTIFY_CLIENT_SECRET`. In development mode only users you add in the app's user management can connect; more needs Spotify's approval.
+
+Either one can be set up alone. Without them, she sends song links instead of playlists and tells people what isn't connected.
 
 ## Deploy on Railway
 

@@ -2,6 +2,7 @@ import type { Db } from "../db";
 import type { Llm } from "../llm/provider";
 import type { ImageInput, ImageReference } from "./images";
 import type { Clock } from "./clock";
+import type { IntegrationsConfig } from "./integrations/connect";
 
 export type Initiative = "off" | "low" | "medium" | "high";
 export const INITIATIVE_LEVELS: Initiative[] = ["off", "low", "medium", "high"];
@@ -48,6 +49,8 @@ export interface User {
   lastSpontaneousAt: Date | null;
   /** Whether she may do playful things beyond words when she is in a mood. */
   mischief: boolean;
+  /** How much she does in their accounts without asking. */
+  autonomy: "ask" | "normal" | "auto";
   encryptedApiKey: string | null;
   lastUserMessageAt: Date | null;
   lastEmiMessageAt: Date | null;
@@ -147,6 +150,8 @@ export interface Deps {
   llmFor(user: User): Llm | null;
   /** What she can send besides text. Filled in by the channel and the config. */
   expression?: ExpressionKit;
+  /** Calendar, to-dos and music, when the server has them set up. */
+  integrations?: IntegrationsConfig;
 }
 
 /** Besides text, what a reply can carry. */
@@ -172,7 +177,7 @@ export interface ExpressionKit {
 export interface MischiefAct {
   id: string;
   userId: string;
-  kind: "pin";
+  kind: "pin" | "event" | "task";
   detail: Record<string, unknown>;
   createdAt: Date;
 }

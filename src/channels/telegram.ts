@@ -13,6 +13,8 @@ import { afterTurn, handleTurn } from "../core/pipeline";
 import { classifyTurn } from "../core/prompt";
 import { bubbleWaits, isPaced, typingMs } from "../core/rhythm";
 import { normalizeEmoji, recordMischief, undoAll } from "../core/expression";
+import { AUTONOMY_LEVELS, claimHeld, markHeld, runAction, type Autonomy } from "../core/integrations/actions";
+import { configured, connectUrl, connectedProviders, disconnect, PROVIDERS, type Provider } from "../core/integrations/connect";
 import { INITIATIVE_LEVELS, type Deps, type Extras, type Initiative, type IncomingMessage, type Outbound, type SentExtras, type User } from "../core/types";
 import { addMessage, chatIdFor, getUser, spentToday, updateUser, userForChannel } from "../core/users";
 import { chunkText, toTelegramHtml } from "./telegram-format";
@@ -30,7 +32,10 @@ const HELP = [
   "/forget <id> — make me forget one thing",
   "/agenda — what I'm planning to bring up",
   "/initiative off | low | medium | high — how often I write first",
-  "/mischief on | off — whether I may pin a sulk in our chat when you've annoyed me",
+  "/mischief on | off — whether I may pin a sulk in our chat, or do small unasked things, when I'm in a mood",
+  "/connect google | spotify — let me see and edit your calendar and to-dos, or make you playlists",
+  "/disconnect google | spotify — take that access back",
+  "/autonomy ask | normal | auto — how much I do in your accounts without asking first",
   "/timezone <Area/City> — where you are, e.g. Europe/Berlin",
   "/quiet <from> <to> — hours I stay silent, e.g. /quiet 23 8",
   "/usage — what today has cost, and /cap <usd> to change the limit on what I spend unasked",
@@ -41,6 +46,8 @@ const HELP = [
 export interface Telegram {
   bot: Bot;
   outbound: Outbound;
+  /** Tells someone in their chat that an account was connected. */
+  announceConnection(userId: string, provider: Provider): Promise<void>;
   /** Loads the configured sticker sets. Call once before starting the bot. */
   loadStickers(): Promise<number>;
   /** Emoji of the stickers she can send. */
@@ -282,6 +289,66 @@ export function createTelegram(deps: Deps, config: Config): Telegram {
     return reply(arg === "on" ? "ok. behave." : "ok. no more pinned sulks, i'll just tell you.");
   });
 
+  const NAMES: Record<Provider, string> = { google: "Google (calendar and to-dos)", spotify: "Spotify" };
+
+  command("connect", async (ctx, user, arg, reply) => {
+    const integrations = deps.integrations;
+    const provider = arg.toLowerCase() as Provider;
+    if (!PROVIDERS.includes(provider)) {
+      const connected = await connectedProviders(deps.db, user.id);
+      return reply(`connected: ${connected.length ? connected.map((name) => NAMES[name]).join(", ") : "nothing yet"}. send /connect google or /connect spotify.`);
+    }
+    if (!integrations || !configured(integrations, provider)) return reply(`${NAMES[provider]} isn't set up on this server yet.`);
+    const url = connectUrl(integrations, provider, user.id, deps.clock());
+    await ctx.reply(`tap to connect ${NAMES[provider]}. the link works for 15 minutes and only for you.`, {
+      reply_markup: { inline_keyboard: [[{ text: `connect ${provider}`, url }]] },
+    });
+    await addMessage(deps.db, { userId: user.id, role: "emi", content: `[sent them a link to connect ${NAMES[provider]}]`, kind: "command", at: deps.clock() });
+  });
+
+  command("disconnect", async (_ctx, user, arg, reply) => {
+    const provider = arg.toLowerCase() as Provider;
+    if (!PROVIDERS.includes(provider)) return reply("send /disconnect google or /disconnect spotify.");
+    const removed = await disconnect(deps.db, user.id, provider);
+    return reply(removed ? `done. i can't see or touch your ${NAMES[provider]} anymore. you can also remove my access in your ${provider === "google" ? "Google account" : "Spotify"} settings.` : `${NAMES[provider]} wasn't connected.`);
+  });
+
+  command("autonomy", async (_ctx, user, arg, reply) => {
+    if (!AUTONOMY_LEVELS.includes(arg as Autonomy)) {
+      return reply(`it's ${user.autonomy}. ask: every change waits for your ok. normal: i add things and tick things off myself, and ask before moving or removing anything. auto: i just do it.`);
+    }
+    await updateUser(deps.db, user.id, { autonomy: arg as Autonomy });
+    return reply(arg === "ask" ? "ok. i'll ask before every change." : arg === "auto" ? "ok. i'll just handle it." : "ok, normal.");
+  });
+
+  // A tap on ✅ or ✖️ under something she wanted to change.
+  bot.on("callback_query:data", async (ctx) => {
+    const match = /^act:([0-9a-f-]{36}):(y|n)$/.exec(ctx.callbackQuery.data);
+    const identity = match ? await userOf(ctx) : null;
+    if (!match || !identity) return ctx.answerCallbackQuery().catch(() => undefined);
+    const [, id, answer] = match;
+    await enqueue(identity.id, async () => {
+      const user = await getUser(deps.db, identity.id);
+      const integrations = deps.integrations;
+      const claimed = user ? await claimHeld(deps.db, user.id, id!, answer === "y" ? "done" : "declined", deps.clock()) : null;
+      if (!user || !claimed) {
+        await ctx.answerCallbackQuery({ text: "that one's already decided or too old" }).catch(() => undefined);
+        return;
+      }
+      let line: string;
+      if (answer === "n" || !integrations) line = `✖️ skipped: ${claimed.summary.replace(/^\S+ /, "")}`;
+      else {
+        const outcome = await runAction(deps.db, integrations, user, claimed.resolved, deps.clock);
+        await markHeld(deps.db, id!, outcome.ok ? "done" : "failed");
+        line = outcome.text;
+      }
+      await ctx.editMessageText(line).catch(() => undefined);
+      await ctx.answerCallbackQuery().catch(() => undefined);
+      await addMessage(deps.db, { userId: user.id, role: "user", content: `[tapped ${answer === "y" ? "✅" : "✖️"} on: ${claimed.summary}]`, kind: "command", at: deps.clock() });
+      await addMessage(deps.db, { userId: user.id, role: "emi", content: line, kind: "command", at: deps.clock() });
+    });
+  });
+
   command("timezone", async (_ctx, user, arg, reply) => {
     if (!isValidTimeZone(arg)) return reply(`i have ${user.timezoneKnown ? user.timezone : "nothing yet"}. send it like /timezone Europe/Berlin, or just tell me your city.`);
     await updateUser(deps.db, user.id, { timezone: arg, timezoneKnown: true });
@@ -381,6 +448,11 @@ export function createTelegram(deps: Deps, config: Config): Telegram {
         await sendBubbles(chatId, result.bubbles, paced ? bubbleWaits(result.bubbles, Date.now() - started, deps.random) : undefined);
         const sent = await sendExtras(chatId, result.extras);
         await recordMischief(deps.db, userId, sent, deps.clock());
+        // What she did in their accounts, as the app's own short note, and what waits for a tap.
+        if (result.actions?.done.length) await bot.api.sendMessage(chatId, result.actions.done.join("\n"), { link_preview_options: { is_disabled: true } });
+        for (const item of result.actions?.held ?? []) {
+          await bot.api.sendMessage(chatId, item.summary, { reply_markup: { inline_keyboard: [[{ text: "✅ do it", callback_data: `act:${item.id}:y` }, { text: "✖️ no", callback_data: `act:${item.id}:n` }]] } });
+        }
       });
       if (!result.problem) {
         void afterTurn(deps, userId, result).catch((error) => { if (!(error instanceof ConversationReset)) console.warn("[background]", error); });
@@ -424,5 +496,13 @@ export function createTelegram(deps: Deps, config: Config): Telegram {
   });
 
   bot.catch((error) => console.error("[telegram]", error.message));
-  return { bot, outbound, loadStickers, stickerEmoji: () => [...stickers.keys()] };
+  async function announceConnection(userId: string, provider: Provider): Promise<void> {
+    const chatId = await chatIdFor(deps.db, userId, CHANNEL);
+    if (!chatId) return;
+    const line = provider === "google" ? "google's connected. i can see your week and your to-dos now." : "spotify's connected. playlists incoming, eventually.";
+    await bot.api.sendMessage(chatId, line);
+    await addMessage(deps.db, { userId, role: "emi", content: line, kind: "command", at: deps.clock() });
+  }
+
+  return { bot, outbound, loadStickers, stickerEmoji: () => [...stickers.keys()], announceConnection };
 }
