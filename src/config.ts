@@ -10,6 +10,7 @@ const Env = z.object({
   EMI_MASTER_KEY: z.string().min(40),
   EMI_SHARED_OPENROUTER_KEY: z.string().optional(),
   EMI_WEB_ENABLED: z.enum(["true", "false"]).default("true"),
+  EMI_PACING: z.enum(["true", "false"]).default("true"),
   EMI_ALLOWED_TELEGRAM_IDS: z.string().optional(),
   EMI_WRITER_MODEL: z.string().default("deepseek/deepseek-v4.1-flash"),
   EMI_VISION_MODEL: z.string().optional(),
@@ -25,6 +26,8 @@ export interface Config {
   allowedTelegramIds: Set<string> | null;
   models: Models;
   webEnabled?: boolean;
+  /** Type chat replies at a human pace. Off unless set, so tests never wait. */
+  pacing?: boolean;
 }
 
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
@@ -38,6 +41,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
   return {
     telegramToken: e.TELEGRAM_BOT_TOKEN,
     webEnabled: e.EMI_WEB_ENABLED === "true",
+    pacing: e.EMI_PACING === "true",
     databaseUrl: e.DATABASE_URL,
     masterKey: parseMasterKey(e.EMI_MASTER_KEY),
     sharedKey: e.EMI_SHARED_OPENROUTER_KEY?.trim() || null,

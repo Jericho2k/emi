@@ -10,6 +10,7 @@ import { world } from "./helpers";
 // Adapter tests inspect the writer's inputs; extraction has its own integration
 // suite and must not race these assertions after a reply has been delivered.
 vi.mock("../src/core/extraction", () => ({ runExtraction: vi.fn(async () => null) }));
+vi.mock("../src/core/inner", async (original) => ({ ...await original<typeof import("../src/core/inner")>(), ensureInnerDay: vi.fn(async () => null) }));
 
 const botUser = { id: 999, is_bot: true as const, first_name: "Emi", username: "emi_test_bot", can_join_groups: false, can_read_all_group_messages: false, supports_inline_queries: false, can_connect_to_business: false, has_main_web_app: false, has_topics_enabled: false, allows_users_to_create_topics: false, can_manage_bots: false, supports_join_request_queries: false };
 const person = { id: 42, is_bot: false as const, first_name: "Sam" };
@@ -24,7 +25,9 @@ async function setup(failSend: (text: string) => boolean = () => false) {
   const { bot } = createTelegram(w.deps, config);
   bot.botInfo = botUser;
   const sent: string[] = [];
+  const methods: Array<{ method: string; payload: any }> = [];
   bot.api.config.use(async (_prev, method, payload) => {
+    methods.push({ method, payload });
     if (method === "sendMessage" && "text" in payload && failSend(String(payload.text))) throw new Error("Telegram unavailable");
     const result = method === "sendMessage" && "text" in payload ? message(String(payload.text), { from: botUser }) : true;
     if (method === "sendMessage" && "text" in payload) sent.push(String(payload.text));
@@ -41,7 +44,7 @@ async function setup(failSend: (text: string) => boolean = () => false) {
     const rows = (await w.db.query<{ user_id: string }>("select user_id from channel_identities where channel = 'telegram' and external_id = '42'")).rows;
     return (await getUser(w.db, rows[0]!.user_id))!;
   }
-  return { w, config, sent, send, user };
+  return { w, config, sent, methods, send, user };
 }
 
 describe("Telegram conversation continuity", () => {
@@ -148,6 +151,20 @@ describe("Telegram conversation continuity", () => {
     expect(contents.indexOf("hello before the timezone change")).toBeLessThan(contents.indexOf("/timezone Asia/Tokyo"));
     expect(contents.indexOf("/timezone Asia/Tokyo")).toBeLessThan(contents.indexOf("hello after the timezone change"));
     expect(t.w.calls[1]!.messages.at(-1)!.content).toContain("21:00");
+  });
+
+  it("reacts to the last message of a burst instead of writing, when a reaction is the whole reply", async () => {
+    const t = await setup();
+    t.w.script = () => "<<react:❤️>>";
+    await t.send("thank you so much");
+    await t.send("seriously");
+    await t.send("/agenda");
+    const reactions = t.methods.filter((call) => call.method === "setMessageReaction");
+    expect(reactions).toHaveLength(1);
+    expect(reactions[0]!.payload).toMatchObject({ chat_id: 42, message_id: 2, reaction: [{ type: "emoji", emoji: "❤" }] });
+    expect(t.sent).toEqual(["nothing planned."]); // no text bubble, no raw tag
+    const stored = await recentMessages(t.w.db, (await t.user()).id, 20);
+    expect(stored.find((m) => m.role === "emi" && m.kind === "reply")?.content).toBe("[reacted with ❤]");
   });
 
 

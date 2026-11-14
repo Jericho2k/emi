@@ -2,7 +2,7 @@ import type { Db } from "../db";
 import type { Usage } from "../llm/provider";
 import { IMAGE_REFERENCES_SQL, validateImages, type ImageInput } from "./images";
 import { localParts, localToUtc } from "./clock";
-import { INITIATIVE_LEVELS, type Initiative, type Mood, type ReplyContext, type StoredMessage, type User } from "./types";
+import { INITIATIVE_LEVELS, type Bond, type InnerDay, type Initiative, type Mood, type ReplyContext, type StoredMessage, type User } from "./types";
 
 type Row = Record<string, any>;
 
@@ -13,6 +13,8 @@ function dateKey(value: unknown): string | null {
   if (value instanceof Date) return value.toISOString().slice(0, 10);
   return String(value).slice(0, 10);
 }
+
+const json = (value: unknown): any => (typeof value === "string" ? JSON.parse(value) : value);
 
 export function userFromRow(row: Row): User {
   return {
@@ -25,7 +27,10 @@ export function userFromRow(row: Row): User {
     quietStart: row.quiet_start,
     quietEnd: row.quiet_end,
     dailyCapUsd: Number(row.daily_cap_usd),
-    mood: (typeof row.mood === "string" ? JSON.parse(row.mood) : row.mood) ?? {},
+    mood: json(row.mood) ?? {},
+    bond: json(row.bond) ?? {},
+    innerDays: Array.isArray(json(row.inner_days)) ? json(row.inner_days) : [],
+    lastSpontaneousAt: toDate(row.last_spontaneous_at),
     encryptedApiKey: row.encrypted_api_key ?? null,
     lastUserMessageAt: toDate(row.last_user_message_at),
     lastEmiMessageAt: toDate(row.last_emi_message_at),
@@ -73,15 +78,18 @@ const SETTABLE: Record<string, string> = {
   quietEnd: "quiet_end", dailyCapUsd: "daily_cap_usd", encryptedApiKey: "encrypted_api_key",
   lastUserMessageAt: "last_user_message_at", lastEmiMessageAt: "last_emi_message_at",
   extractedThrough: "extracted_through", consolidatedThrough: "consolidated_through", lastPlannedOn: "last_planned_on",
+  lastSpontaneousAt: "last_spontaneous_at",
 };
+const JSON_COLUMNS: Record<string, string> = { mood: "mood", bond: "bond", innerDays: "inner_days" };
 
-export async function updateUser(db: Db, id: string, patch: Partial<Omit<User, "id" | "mood" | "createdAt">> & { mood?: Mood }): Promise<void> {
+export async function updateUser(db: Db, id: string, patch: Partial<Omit<User, "id" | "mood" | "bond" | "innerDays" | "createdAt">> & { mood?: Mood; bond?: Bond; innerDays?: InnerDay[] }): Promise<void> {
   const sets: string[] = [], params: unknown[] = [id];
   for (const [key, value] of Object.entries(patch)) {
     if (value === undefined) continue;
-    if (key === "mood") {
+    const jsonColumn = JSON_COLUMNS[key];
+    if (jsonColumn) {
       params.push(JSON.stringify(value));
-      sets.push(`mood = $${params.length}::jsonb`);
+      sets.push(`${jsonColumn} = $${params.length}::jsonb`);
       continue;
     }
     const column = SETTABLE[key];

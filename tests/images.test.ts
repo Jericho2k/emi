@@ -26,6 +26,7 @@ afterEach(() => { vi.unstubAllGlobals(); vi.restoreAllMocks(); });
 
 vi.mock("../src/core/extraction", () => ({ runExtraction: vi.fn(async () => null) }));
 vi.mock("../src/core/memory/timeline", async (original) => ({ ...await original<typeof import("../src/core/memory/timeline")>(), runConsolidation: vi.fn(async () => null) }));
+vi.mock("../src/core/inner", async (original) => ({ ...await original<typeof import("../src/core/inner")>(), ensureInnerDay: vi.fn(async () => null) }));
 
 describe("Telegram image input", () => {
   it("downloads the largest photo privately and detects its actual format", async () => {

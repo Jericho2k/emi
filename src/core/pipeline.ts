@@ -1,9 +1,12 @@
 import { LlmResponseError } from "../llm/provider";
 import { ProviderError } from "../llm/openrouter";
 import { absorbOnUserMessage, openForWeave, setStatus } from "./agenda/store";
+import { bondSnapshot } from "./bond";
+import { runExtraction } from "./extraction";
+import { ensureInnerDay, onHerMind } from "./inner";
 import { recall } from "./memory/recall";
-import { timelineFor } from "./memory/timeline";
-import { agendaLabel, buildTurnMessages, classifyTurn, historyWindow, joinBubbles, parseReply, type TurnKind } from "./prompt";
+import { runConsolidation, timelineFor } from "./memory/timeline";
+import { agendaLabel, buildTurnMessages, classifyTurn, historyWindow, parseReply, storedReply, type TurnKind } from "./prompt";
 import { imageHistory, validateImages, VISION_CONTEXT } from "./images";
 import { messageContent } from "./message";
 import type { Deps, IncomingMessage } from "./types";
@@ -11,7 +14,10 @@ import { attachSources, webContext } from "./web";
 import { addMessage, getUser, messageCount, recentMessages, recordUsage } from "./users";
 
 export interface TurnResult {
+  /** What to send. Empty when she only reacted. */
   bubbles: string[];
+  /** An emoji reaction to put on their last message. */
+  reaction?: string;
   turnKind: TurnKind;
   /** Set when no reply could be written; `bubbles` then holds a plain notice. */
   problem?: "no_key" | "key_rejected" | "model_unavailable";
@@ -75,6 +81,7 @@ export async function handleTurn(deps: Deps, userId: string, input: string | Inc
 
   const messages = buildTurnMessages({
     user, now, recall: recalled, weave, turnKind, previousUserAt, timeline: await timelineFor(db, user),
+    bond: await bondSnapshot(db, user, now), onHerMind: onHerMind(user, now),
     images, historyImages: await imageHistory(db, userId, history, images),
     hasPriorConversation: history.length > 0 || incoming.some((message) => !!message.replyTo),
   }, history, content);
@@ -106,11 +113,25 @@ export async function handleTurn(deps: Deps, userId: string, input: string | Inc
   await recordUsage(db, userId, "reply", reply.usage, now);
 
   const parsed = parseReply(reply.text, turnKind);
-  const bubbles = attachSources(parsed.bubbles.length ? parsed.bubbles : [reply.text.trim()], reply.citations);
+  const reactionOnly = !parsed.bubbles.length && !!parsed.reaction;
+  const bubbles = attachSources(parsed.bubbles.length || reactionOnly ? parsed.bubbles : [reply.text.trim()], reply.citations);
   for (const [index, item] of weave.entries()) {
     if (parsed.used.includes(agendaLabel(index))) await setStatus(db, item.id, "woven", "brought up in conversation", now);
   }
-  await addMessage(db, { userId, role: "emi", content: joinBubbles(bubbles), at: deps.clock() });
+  await addMessage(db, { userId, role: "emi", content: storedReply(bubbles, parsed.reaction), at: deps.clock() });
 
-  return { bubbles, turnKind, recalledIds: [...recalled.standing, ...recalled.relevant].map((memory) => memory.id) };
+  return {
+    bubbles, turnKind, ...(parsed.reaction ? { reaction: parsed.reaction } : {}),
+    recalledIds: [...recalled.standing, ...recalled.relevant, ...recalled.us, ...recalled.self].map((memory) => memory.id),
+  };
+}
+
+/**
+ * Everything that follows a reply, off the reply path: what to remember, the
+ * long timeline, and what is on her mind today. Each step fails on its own.
+ */
+export async function afterTurn(deps: Deps, userId: string, result: Pick<TurnResult, "recalledIds">): Promise<void> {
+  await runExtraction(deps, userId, { memoryIds: result.recalledIds }).catch((error) => console.warn("[extraction]", error));
+  await runConsolidation(deps, userId).catch((error) => console.warn("[timeline]", error));
+  await ensureInnerDay(deps, userId).catch((error) => console.warn("[inner]", error));
 }

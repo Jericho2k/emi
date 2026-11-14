@@ -2,6 +2,8 @@ import { z } from "zod";
 import { LlmResponseError, parseJsonObject, type ChatMessage } from "../llm/provider";
 import { DAILY_PING_BUDGET, SILENCE_HOURS } from "./agenda/policy";
 import { claimDuePings, expireStale, hasOpenInitiative, setPing, setStatus, upsertAgendaItem } from "./agenda/store";
+import { bondLines, bondSnapshot, currentIrritation, IRRITATION_HOLDS_INITIATIVE, type BondSnapshot } from "./bond";
+import { ensureInnerDay, onHerMind, sweepInnerDays } from "./inner";
 import { describeGap, describeMoment, inQuietHours, localParts, localToUtc, nextAwake } from "./clock";
 import { runExtraction } from "./extraction";
 import { activeMemories } from "./memory/store";
@@ -26,6 +28,10 @@ export async function pingVerdict(deps: Deps, user: User, item: AgendaItem, now:
   const within = (date: Date) => (date.getTime() <= item.windowEnd.getTime() ? date : null);
 
   if (user.initiative === "off") return { send: false, retryAt: null, why: "initiative is off" };
+  // Annoyed people don't text first. It fades in hours, so look again later.
+  if (currentIrritation(user.bond, now) >= IRRITATION_HOLDS_INITIATIVE) {
+    return { send: false, retryAt: within(new Date(now.getTime() + 3 * HOUR)), why: "she is still annoyed" };
+  }
   if (inQuietHours(now, user.timezone, user.quietStart, user.quietEnd)) {
     const awake = nextAwake(now, user.timezone, user.quietStart, user.quietEnd);
     return { send: false, retryAt: within(new Date(awake.getTime() + (15 + deps.random() * 45) * MINUTE)), why: "quiet hours" };
@@ -53,7 +59,13 @@ async function compose(deps: Deps, user: User, item: AgendaItem, now: Date): Pro
 
   const notes = item.kind === "reminder"
     ? `They asked you to remind them about this, and now is the time: "${item.about}". Tell them, briefly, in your own voice.`
-    : [
+    : item.spontaneous ? [
+      "Nobody wrote to you. You are writing just because: you're close, and this made you think of them.",
+      `What it's about: "${item.about}".`,
+      item.reason ? `Why it made you think of them: ${item.reason}.` : "",
+      "Read the conversation above first. If the moment is wrong (they're busy, stressed, or it would land oddly now), reply with exactly HOLD.",
+      "Otherwise text it the way you'd send a friend something: short, light, specific. No \"thinking of you\", no \"just checking in\", no question they have to answer.",
+    ].filter(Boolean).join("\n") : [
       "Nobody wrote to you. You are writing first, because you thought of them.",
       `What it's about: "${item.about}".`,
       // Without this she guesses, and "yesterday" for something from this morning reads as not having listened.
@@ -64,7 +76,15 @@ async function compose(deps: Deps, user: User, item: AgendaItem, now: Date): Pro
       "Otherwise write what you'd text: short, specific to them, no greeting formula, no \"just checking in\", nothing about remembering, notes or schedules.",
     ].filter(Boolean).join("\n");
   const messages: ChatMessage[] = [{ role: "system", content: `${PERSONA}\n\n${webContext(false)}` }, ...renderHistory(await recentMessages(deps.db, user.id, 20), user.timezone)];
-  const final = `<notes>\nPrivate notes for you. They cannot see these.\nNow, where they are: ${describeMoment(now, user.timezone)}.\n${notes}\n</notes>`;
+  const bond = await bondSnapshot(deps.db, user, now);
+  const inner = onHerMind(user, now);
+  const final = [
+    "<notes>", "Private notes for you. They cannot see these.",
+    `Now, where they are: ${describeMoment(now, user.timezone)}.`,
+    ...bondLines(bond, user, now, null),
+    ...(inner ? [`On your mind ${inner.today ? "today" : "lately"}: ${inner.thought}`] : []),
+    notes, "</notes>",
+  ].join("\n");
   const last = messages[messages.length - 1];
   if (last?.role === "user") last.content += `\n${final}`;
   else messages.push({ role: "user", content: final });
@@ -127,7 +147,10 @@ Rules:
 - Never a bare "how are you", "how's your day", or anything that could be sent to anyone.
 - Not something they already settled in the recent conversation.
 - importance 1: she would mention it only if they happen to write. importance 2: worth a message of her own.
-- If they have seemed busy, stressed or short lately, null.`;
+- If they have seemed busy, stressed or short lately, null.
+- "just_because" is false for all of the above.
+
+Sometimes the input says Emi is close enough to them to write just because. Then she may also reach out with no event behind it, the way close friends send each other things: a thought on her mind today ("t1") that connects to something they love, a callback to a joke between them, a fact they would enjoy given what they like. Then "just_because" is true, "importance" is 2, and "based_on" cites what it connects (at least one of their memories). It must be something that would make THEM smile, specific to them; never "thinking of you", never a question they owe an answer to. Even then, null is still the most common answer.`;
 
 const ReachOut = z.object({
   about: z.string().trim().min(3).max(160),
@@ -135,7 +158,19 @@ const ReachOut = z.object({
   importance: z.coerce.number().int().min(1).max(2).catch(1),
   part_of_day: z.enum(["soon", "afternoon", "evening"]).catch("soon"),
   based_on: z.array(z.string()).min(1),
+  just_because: z.boolean().catch(false).default(false),
 });
+
+/** Days between messages she sends with no reason but that she thought of them. */
+export const JUST_BECAUSE_EVERY_DAYS = 3;
+/** Closeness stage from which she may write just because (3 = close). */
+export const JUST_BECAUSE_FROM_STAGE = 3;
+
+/** Whether she is close enough, calm enough and has waited long enough to write just because. */
+export function mayWriteJustBecause(user: User, bond: BondSnapshot, now: Date): boolean {
+  if (bond.stage.index < JUST_BECAUSE_FROM_STAGE || bond.irritation >= 0.2 || user.initiative === "low") return false;
+  return !user.lastSpontaneousAt || now.getTime() - user.lastSpontaneousAt.getTime() >= JUST_BECAUSE_EVERY_DAYS * 24 * HOUR;
+}
 
 /** At most once per local day, and only for people who have been around. */
 export async function runDailyPlanner(deps: Deps): Promise<number> {
@@ -168,17 +203,30 @@ async function planFor(deps: Deps, user: User, now: Date): Promise<boolean> {
 
   // Checked in code before paying for a model call: is there anything recent
   // in their life to have a reason about at all?
-  const recent = (await activeMemories(deps.db, user.id))
+  const all = await activeMemories(deps.db, user.id);
+  const recent = all
     .filter((memory) => (memory.kind === "event" || memory.kind === "state") && now.getTime() - memory.createdAt.getTime() < 21 * 24 * HOUR)
     .slice(-15);
-  if (!recent.length) return false;
-  const labels = recent.map((memory, index) => ({ label: `m${index + 1}`, memory }));
+  // Close friends also write with no event behind it, from what they love and what is between them.
+  const justBecause = mayWriteJustBecause(user, await bondSnapshot(deps.db, user, now), now);
+  const lasting = justBecause ? [
+    ...all.filter((memory) => memory.kind === "preference").slice(-6),
+    ...all.filter((memory) => memory.kind === "us").slice(-4),
+  ] : [];
+  if (!recent.length && !lasting.length) return false;
+  const labels = [...recent, ...lasting].map((memory, index) => ({ label: `m${index + 1}`, memory }));
+  const inner = justBecause ? await ensureInnerDay(deps, user.id) : null;
   const history = await recentMessages(deps.db, user.id, 12);
 
   const prompt = [
     `Now, where they are: ${describeMoment(now, user.timezone)}.`,
     "", "What Emi knows that is recent:",
-    ...labels.map(({ label, memory }) => `${label} [${memory.occurredOn ?? localParts(memory.createdAt, user.timezone).dateKey}] ${memory.content}`),
+    ...labels.slice(0, recent.length).map(({ label, memory }) => `${label} [${memory.occurredOn ?? localParts(memory.createdAt, user.timezone).dateKey}] ${memory.content}`),
+    ...(justBecause ? [
+      "", "Emi is close enough to them to write just because. What they love and what is between them:",
+      ...labels.slice(recent.length).map(({ label, memory }) => `${label} [${memory.kind}] ${memory.content}`),
+      ...(inner ? [`t1 [on Emi's mind today] ${inner}`] : []),
+    ] : []),
     "", "Recent conversation:",
     ...history.map((message) => `${message.role === "user" ? "THEM" : "EMI"} (${describeMoment(message.createdAt, user.timezone)}): ${messageContent(message).slice(0, 400)}`),
   ].join("\n");
@@ -189,8 +237,12 @@ async function planFor(deps: Deps, user: User, now: Date): Promise<boolean> {
   const parsed = ReachOut.safeParse((parseJsonObject(result.text) as { reach_out?: unknown } | null)?.reach_out);
   if (!parsed.success) return false;
   const plan = parsed.data;
+  const cited = plan.based_on.map((label) => label.trim().toLowerCase());
   // Grounding is checked, not trusted: every cited memory has to be one we showed.
-  if (!plan.based_on.every((label) => labels.some((entry) => entry.label === label.trim().toLowerCase()))) return false;
+  if (!cited.every((label) => labels.some((entry) => entry.label === label) || (label === "t1" && !!inner))) return false;
+  // Writing just because needs her to be allowed to, and still has to connect to them.
+  if (plan.just_because && (!justBecause || !cited.some((label) => label !== "t1"))) return false;
+  if (plan.just_because) plan.importance = 2;
 
   const local = localParts(now, user.timezone);
   const at = (hour: number) => localToUtc(`${local.dateKey}T${String(hour).padStart(2, "0")}:00`, user.timezone)!;
@@ -206,8 +258,9 @@ async function planFor(deps: Deps, user: User, now: Date): Promise<boolean> {
   if (windowEnd.getTime() <= now.getTime()) return false;
   await upsertAgendaItem(deps.db, {
     userId: user.id, kind: "initiative", about: plan.about, reason: plan.reason, importance: plan.importance as 1 | 2,
-    windowStart: now, windowEnd, pingAt, at: now,
+    windowStart: now, windowEnd, pingAt, spontaneous: plan.just_because, at: now,
   });
+  if (plan.just_because) await updateUser(deps.db, user.id, { lastSpontaneousAt: now });
   return true;
 }
 
@@ -235,4 +288,5 @@ export async function tick(deps: Deps, outbound: Outbound): Promise<void> {
   await runDailyPlanner(deps);
   await sweepExtraction(deps);
   await sweepConsolidation(deps);
+  await sweepInnerDays(deps);
 }
