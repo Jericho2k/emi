@@ -5,7 +5,7 @@ import { telegramInput } from "../src/channels/telegram-input";
 import { InputFile, type Api } from "grammy";
 import type { Message, Update } from "grammy/types";
 import { exportAccount, wipeAccount } from "../src/core/account";
-import { ImageInputError, MAX_IMAGE_BYTES, MAX_TURN_IMAGES, imageHistory, loadImages, type ImageInput } from "../src/core/images";
+import { FRESH_IMAGE_MS, ImageInputError, MAX_IMAGE_BYTES, MAX_TURN_IMAGES, findStoredImage, imageHistory, loadImages, type ImageInput } from "../src/core/images";
 import { handleTurn } from "../src/core/pipeline";
 import { addMessage, recentMessages } from "../src/core/users";
 import { openRouter } from "../src/llm/openrouter";
@@ -22,6 +22,7 @@ const photo = (patch: Partial<Message.PhotoMessage> = {}): Message.PhotoMessage 
   photo: [{ file_id: "small", file_unique_id: "a", width: 20, height: 20 }, { file_id: "large", file_unique_id: "b", width: 400, height: 600 }], ...patch,
 });
 const text = (content: string): Message.TextMessage => ({ message_id: 2, date: 1, from: person, chat, text: content });
+const isDescription = (call: { messages: Array<{ content: string }> }) => call.messages[0]!.content.startsWith("You write the stored description");
 afterEach(() => { vi.unstubAllGlobals(); vi.restoreAllMocks(); });
 
 vi.mock("../src/core/extraction", () => ({ runExtraction: vi.fn(async () => null) }));
@@ -36,7 +37,7 @@ describe("Telegram image input", () => {
     expect(telegramImageFile(msg)?.fileId).toBe("large");
     const input = await telegramImages({ getFile } as unknown as Pick<Api, "getFile">, "private-token", msg, telegramInput(msg, 999));
     expect(input.text).toBe(msg.caption);
-    expect(input.images).toEqual([image]);
+    expect(input.images).toEqual([{ ...image, sourceKey: "telegram:b" }]);
     expect(getFile).toHaveBeenCalledWith("large", expect.any(AbortSignal));
     expect(JSON.stringify(input)).not.toContain("private-token");
     expect(JSON.stringify(input)).not.toContain("api.telegram.org");
@@ -105,7 +106,8 @@ describe("Telegram image input", () => {
     await send(text("compare them"), 4);
     // Flush pending arrivals without waiting for the debounce timeout.
     await send({ ...text("/agenda"), entities: [{ type: "bot_command", offset: 0, length: 7 }] }, 5);
-    expect(w.calls).toHaveLength(1);
+    // Later calls are the background descriptions of the three pictures.
+    expect(w.calls.filter((call) => !isDescription(call))).toHaveLength(1);
     const final = w.calls[0]!.messages.at(-1)!;
     expect(final.images).toHaveLength(3);
     expect(final.content.indexOf("first")).toBeLessThan(final.content.indexOf("second"));
@@ -136,19 +138,84 @@ describe("image conversation storage and follow-ups", () => {
     expect(w.calls[1]!.options.model).toBe("vision-model");
   });
 
-  it("uses the normal writer when no image is in context and bounds automatic replay", async () => {
+  it("uses the normal writer when no image is in context and bounds replay of undescribed older images", async () => {
     const w = await world();
     const user = await w.newUser();
     await handleTurn(w.deps, user.id, "hello");
     expect(w.calls[0]!.options.model).toBe("writer");
     for (let n = 0; n < 4; n++) await addMessage(w.db, { userId: user.id, role: "user", content: `image ${n}`, images: [image], at: w.now });
+    w.advance(FRESH_IMAGE_MS + 1);
     const history = await recentMessages(w.db, user.id, 20);
-    const context = await imageHistory(w.db, user.id, history, []);
+    const context = await imageHistory(w.db, user.id, history, [], w.now);
     expect([...context.values()].flat()).toHaveLength(2);
-    const loadedIds = [...context.keys()];
-    expect(loadedIds).toEqual(history.filter((m) => m.images?.length).slice(-2).map((m) => m.id));
+    expect([...context.keys()]).toEqual(history.filter((m) => m.images?.length).slice(-2).map((m) => m.id));
     await handleTurn(w.deps, user.id, "look at the pictures again");
-    expect(w.calls.at(-1)!.messages.map((m) => m.content).join("\n")).toContain("omitted pixels cannot be inspected");
+    expect(w.calls.at(-1)!.messages.map((m) => m.content).join("\n")).toContain("its pixels cannot be inspected");
+  });
+
+  it("keeps pixels for the next two replies, then sends the stored description instead", async () => {
+    const w = await world();
+    const user = await w.newUser();
+    const pixels = () => w.calls.at(-1)!.messages.flatMap((m) => m.images ?? []);
+    await handleTurn(w.deps, user.id, [{ text: "what's on this receipt?", images: [image] }]);
+    await w.db.query("update message_images set description = 'A receipt. Total: 12.40 EUR.'");
+    w.advance(60_000);
+    await handleTurn(w.deps, user.id, "and the tip?");
+    expect(pixels()).toHaveLength(1);
+    w.advance(60_000);
+    await handleTurn(w.deps, user.id, "ok");
+    expect(pixels()).toHaveLength(1);
+    w.advance(60_000);
+    await handleTurn(w.deps, user.id, "what was the total again?");
+    expect(pixels()).toHaveLength(0);
+    expect(w.calls.at(-1)!.options.model).toBe("writer");
+    expect(w.calls.at(-1)!.messages.map((m) => m.content).join("\n")).toContain("Total: 12.40 EUR.");
+  });
+
+  it("stops attaching a described picture once the conversation has moved on in time", async () => {
+    const w = await world();
+    const user = await w.newUser();
+    await handleTurn(w.deps, user.id, [{ text: "look", images: [image] }]);
+    await w.db.query("update message_images set description = 'A cat on a sofa.'");
+    w.advance(FRESH_IMAGE_MS + 1);
+    await handleTurn(w.deps, user.id, "what colour was the cat?");
+    expect(w.calls.at(-1)!.messages.flatMap((m) => m.images ?? [])).toHaveLength(0);
+    expect(w.calls.at(-1)!.messages.map((m) => m.content).join("\n")).toContain("A cat on a sofa.");
+  });
+
+  it("reuses a stored picture when it is replied to, without downloading or copying its bytes", async () => {
+    const w = await world();
+    const user = await w.newUser();
+    const first = await addMessage(w.db, { userId: user.id, role: "user", content: "my desk", images: [{ ...image, sourceKey: "telegram:b" }], at: w.now });
+    const stored = await findStoredImage(w.db, user.id, "telegram:b");
+    expect(stored).toMatchObject({ storedId: first.images![0]!.id, mimeType: "image/png" });
+    expect(await findStoredImage(w.db, (await w.newUser()).id, "telegram:b")).toBeNull();
+    const getFile = vi.fn();
+    const msg = { ...text("what's on the left?"), reply_to_message: { ...photo(), reply_to_message: undefined } };
+    const input = await telegramImages({ getFile } as unknown as Pick<Api, "getFile">, "token", msg, telegramInput(msg, 999), (key) => findStoredImage(w.db, user.id, key));
+    expect(getFile).not.toHaveBeenCalled();
+    expect(input.images).toEqual([expect.objectContaining({ origin: "reply", storedId: first.images![0]!.id })]);
+    w.advance(FRESH_IMAGE_MS + 1);
+    await handleTurn(w.deps, user.id, [input]);
+    expect(w.calls.at(-1)!.messages.flatMap((m) => m.images ?? [])).toHaveLength(1);
+    const rows = (await w.db.query<{ has_data: boolean; source_image_id: string | null }>("select data is not null as has_data, source_image_id from message_images order by message_id")).rows;
+    expect(rows).toEqual([{ has_data: true, source_image_id: null }, { has_data: false, source_image_id: first.images![0]!.id }]);
+    const history = await recentMessages(w.db, user.id, 10);
+    expect(history.at(-2)!.images![0]).toMatchObject({ sourceId: first.images![0]!.id, byteSize: png.byteLength });
+    expect(await loadImages(w.db, user.id, history.at(-2)!.images!)).toEqual([expect.objectContaining({ storedId: first.images![0]!.id, origin: "reply" })]);
+    // The original and the reply are one picture: attached once.
+    const context = await imageHistory(w.db, user.id, history, [], w.now);
+    expect([...context.values()].flat()).toHaveLength(1);
+    const exported = await exportAccount(w.db, user.id, w.now);
+    expect(exported.images.filter((row) => !row.source_image_id)).toHaveLength(1);
+  });
+
+  it("refuses to reference another person's stored image", async () => {
+    const w = await world();
+    const owner = await w.newUser();
+    const other = await w.newUser();
+    const stored = await addMessage(w.db, { userId: owner.id, role: "user", content: "mine", images: [image], at: w.now });
+    await expect(addMessage(w.db, { userId: other.id, role: "user", content: "theirs", images: [{ ...image, storedId: stored.images![0]!.id }], at: w.now })).rejects.toThrow();
   });
 
   it("scopes image loading and export to the owner and erases bytes on wipe", async () => {

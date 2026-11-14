@@ -1,19 +1,30 @@
 import { Agent, type Dispatcher } from "undici";
 import type { Api } from "grammy";
 import type { Message } from "grammy/types";
-import { ImageInputError, MAX_IMAGE_BYTES, imageMime, type ImageInput } from "../core/images";
+import { ImageInputError, MAX_IMAGE_BYTES, MAX_IMAGE_PIXELS, imageMime, type ImageInput } from "../core/images";
 import type { IncomingMessage } from "../core/types";
 
-export interface TelegramImageFile { fileId: string; byteSize?: number }
+export interface TelegramImageFile { fileId: string; uniqueId?: string; byteSize?: number }
 
+/**
+ * The photo size to use: the smallest that still reaches the pixel budget the
+ * image is shrunk to anyway, else the largest. Saves download time without
+ * giving up detail the model would see.
+ */
 export function telegramImageFile(message?: Message): TelegramImageFile | null {
-  const photo = message?.photo?.toSorted((a, b) => a.width * a.height - b.width * b.height).at(-1);
-  if (photo) return { fileId: photo.file_id, byteSize: photo.file_size };
+  const sizes = message?.photo?.toSorted((a, b) => a.width * a.height - b.width * b.height) ?? [];
+  const photo = sizes.find((size) => size.width * size.height >= MAX_IMAGE_PIXELS) ?? sizes.at(-1);
+  if (photo) return { fileId: photo.file_id, uniqueId: photo.file_unique_id, byteSize: photo.file_size };
   const document = message?.document;
   if (document && (/^image\/(?:png|jpeg|webp|gif)$/.test(document.mime_type ?? "") || /\.(?:png|jpe?g|webp|gif)$/i.test(document.file_name ?? ""))) {
-    return { fileId: document.file_id, byteSize: document.file_size };
+    return { fileId: document.file_id, uniqueId: document.file_unique_id, byteSize: document.file_size };
   }
   return null;
+}
+
+/** Stable across bots and time, unlike file_id. Never a URL or token. */
+export function telegramSourceKey(file: TelegramImageFile): string | undefined {
+  return file.uniqueId ? `telegram:${file.uniqueId}` : undefined;
 }
 
 // Railway's outbound IPv6 is opt-in. Keep this scoped to Telegram files;
@@ -131,14 +142,23 @@ async function download(api: Pick<Api, "getFile">, token: string, input: Telegra
   throw new ImageInputError("I couldn't retrieve that image. please send it again.");
 }
 
-export async function telegramImages(api: Pick<Api, "getFile">, token: string, message: Message, input: IncomingMessage): Promise<IncomingMessage> {
+/**
+ * A picture this person already sent is taken from storage: replying to an
+ * old photo, or sending the same file again, downloads and stores nothing.
+ */
+export type StoredImageLookup = (sourceKey: string) => Promise<ImageInput | null>;
+
+export async function telegramImages(api: Pick<Api, "getFile">, token: string, message: Message, input: IncomingMessage, stored?: StoredImageLookup): Promise<IncomingMessage> {
   const files = [
     { file: telegramImageFile(message), origin: undefined },
     { file: telegramImageFile(message.reply_to_message), origin: "reply" as const },
   ];
   const images: ImageInput[] = [];
   for (const { file, origin } of files) {
-    if (file) images.push({ ...await download(api, token, file), ...(origin ? { origin } : {}) });
+    if (!file) continue;
+    const sourceKey = telegramSourceKey(file);
+    const image = (sourceKey && await stored?.(sourceKey).catch(() => null)) || { ...await download(api, token, file), ...(sourceKey ? { sourceKey } : {}) };
+    images.push({ ...image, ...(origin ? { origin } : {}) });
   }
   return images.length ? { ...input, images } : input;
 }
