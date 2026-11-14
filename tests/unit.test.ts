@@ -142,7 +142,7 @@ describe("prompt", () => {
   });
   it("strips the used tag, stray notes tags and an imitated timestamp", () => {
     const parsed = parseReply("[Fri 13 Nov 2026, 22:04]\nhow did the interview go?\n<<used:a1>>", "social");
-    expect(parsed).toEqual({ bubbles: ["how did the interview go?"], used: ["a1"] });
+    expect(parsed).toEqual({ bubbles: ["how did the interview go?"], used: ["a1"], extras: {} });
   });
   it("names a reply habit only once it has formed", () => {
     const reply = (content: string, id: number): StoredMessage => ({ id, role: "emi", kind: "reply", content, agendaItemId: null, createdAt: now });

@@ -46,6 +46,8 @@ export interface User {
   bond: Bond;
   innerDays: InnerDay[];
   lastSpontaneousAt: Date | null;
+  /** Whether she may do playful things beyond words when she is in a mood. */
+  mischief: boolean;
   encryptedApiKey: string | null;
   lastUserMessageAt: Date | null;
   lastEmiMessageAt: Date | null;
@@ -143,9 +145,49 @@ export interface Deps {
   models: Models;
   /** The model client for this person, or null when they have no usable key. */
   llmFor(user: User): Llm | null;
+  /** What she can send besides text. Filled in by the channel and the config. */
+  expression?: ExpressionKit;
+}
+
+/** Besides text, what a reply can carry. */
+export interface Extras {
+  /** An emoji naming the sticker to send; the channel picks one with that emoji. */
+  sticker?: string;
+  /** Text to speak as a voice note. */
+  voice?: string;
+  /** A short status to pin in the chat while she sulks. */
+  pin?: string;
+}
+
+export interface ExpressionKit {
+  /** Emoji of the stickers the channel can send. Empty when it has none. */
+  stickers(): string[];
+  /** Turns text into a voice note (MP3). Absent when no voice is configured. */
+  speak?: (text: string) => Promise<Uint8Array>;
+  /** Whether the voice model understands audio tags like [sighs]. */
+  voiceTags?: boolean;
+}
+
+/** A playful change she made and will undo herself. */
+export interface MischiefAct {
+  id: string;
+  userId: string;
+  kind: "pin";
+  detail: Record<string, unknown>;
+  createdAt: Date;
 }
 
 /** How the core reaches a person when it speaks first. */
 export interface Outbound {
-  send(userId: string, bubbles: string[]): Promise<void>;
+  send(userId: string, bubbles: string[], extras?: Extras): Promise<SentExtras>;
+  /** Reverses a playful change. Absent on channels that cannot make any. */
+  undo?(userId: string, act: MischiefAct): Promise<void>;
+}
+
+/** What the channel actually did with the extras, so it can be stored and undone. */
+export interface SentExtras {
+  sticker?: string;
+  voice?: string;
+  /** The channel's handle on the pinned message, needed to unpin it. */
+  pinned?: { text: string; detail: Record<string, unknown> };
 }

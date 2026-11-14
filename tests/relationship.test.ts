@@ -156,11 +156,11 @@ describe("her own memories and the two of them", () => {
 
 describe("reactions", () => {
   it("parses a reaction alone, a reaction with text, a stray history marker and an unsupported emoji", () => {
-    expect(parseReply("<<react:👍>>", "social")).toEqual({ bubbles: [], used: [], reaction: "👍" });
-    expect(parseReply("<<react:❤️>>\nhaha congrats!!", "social")).toEqual({ bubbles: ["haha congrats!!"], used: [], reaction: "❤" });
-    expect(parseReply("[reacted with 🤣]\nstop", "social")).toEqual({ bubbles: ["stop"], used: [], reaction: "🤣" });
-    expect(parseReply("<<react:🍕>>", "social")).toEqual({ bubbles: [], used: [], reaction: "👍" });
-    expect(parseReply("<<react:🍕>> nice", "social")).toEqual({ bubbles: ["nice"], used: [] });
+    expect(parseReply("<<react:👍>>", "social")).toEqual({ bubbles: [], used: [], extras: {}, reaction: "👍" });
+    expect(parseReply("<<react:❤️>>\nhaha congrats!!", "social")).toEqual({ bubbles: ["haha congrats!!"], used: [], extras: {}, reaction: "❤" });
+    expect(parseReply("[reacted with 🤣]\nstop", "social")).toEqual({ bubbles: ["stop"], used: [], extras: {}, reaction: "🤣" });
+    expect(parseReply("<<react:🍕>>", "social")).toEqual({ bubbles: [], used: [], extras: {}, reaction: "👍" });
+    expect(parseReply("<<react:🍕>> nice", "social")).toEqual({ bubbles: ["nice"], used: [], extras: {} });
   });
 
   it("sends no text when a reaction is the reply, and remembers that it reacted", async () => {

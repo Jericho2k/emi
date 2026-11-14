@@ -4,7 +4,8 @@ import { createTelegram } from "../src/channels/telegram";
 import { telegramInput } from "../src/channels/telegram-input";
 import type { Config } from "../src/config";
 import { decryptKey } from "../src/core/keys";
-import { getUser, recentMessages } from "../src/core/users";
+import { activeMischief } from "../src/core/expression";
+import { getUser, recentMessages, updateUser } from "../src/core/users";
 import { world } from "./helpers";
 
 // Adapter tests inspect the writer's inputs; extraction has its own integration
@@ -21,15 +22,20 @@ const message = (text: string, patch: Partial<Message.TextMessage> = {}): Messag
 
 async function setup(failSend: (text: string) => boolean = () => false) {
   const w = await world();
-  const config: Config = { telegramToken: "123456:test-token", databaseUrl: "unused", masterKey: Buffer.alloc(32, 7), sharedKey: "shared", allowedTelegramIds: null, models: w.deps.models };
-  const { bot } = createTelegram(w.deps, config);
+  const config: Config = { telegramToken: "123456:test-token", databaseUrl: "unused", masterKey: Buffer.alloc(32, 7), sharedKey: "shared", allowedTelegramIds: null, models: w.deps.models, stickerPacks: ["catsunicmass"] };
+  const telegram = createTelegram(w.deps, config);
+  const { bot } = telegram;
   bot.botInfo = botUser;
   const sent: string[] = [];
   const methods: Array<{ method: string; payload: any }> = [];
   bot.api.config.use(async (_prev, method, payload) => {
     methods.push({ method, payload });
     if (method === "sendMessage" && "text" in payload && failSend(String(payload.text))) throw new Error("Telegram unavailable");
-    const result = method === "sendMessage" && "text" in payload ? message(String(payload.text), { from: botUser }) : true;
+    const result = method === "sendMessage" && "text" in payload ? message(String(payload.text), { from: botUser, message_id: 500 + methods.length })
+      : method === "getStickerSet" ? { name: "catsunicmass", title: "cats", sticker_type: "regular", stickers: [
+        { file_id: "cat-laugh-1", emoji: "😹" }, { file_id: "cat-laugh-2", emoji: "😹" }, { file_id: "cat-grumpy", emoji: "😾" }, { file_id: "no-emoji" },
+      ] }
+      : true;
     if (method === "sendMessage" && "text" in payload) sent.push(String(payload.text));
     return { ok: true, result } as Awaited<ReturnType<typeof _prev>>;
   });
@@ -44,7 +50,7 @@ async function setup(failSend: (text: string) => boolean = () => false) {
     const rows = (await w.db.query<{ user_id: string }>("select user_id from channel_identities where channel = 'telegram' and external_id = '42'")).rows;
     return (await getUser(w.db, rows[0]!.user_id))!;
   }
-  return { w, config, sent, methods, send, user };
+  return { w, config, sent, methods, send, user, telegram };
 }
 
 describe("Telegram conversation continuity", () => {
@@ -187,6 +193,62 @@ describe("Telegram conversation continuity", () => {
   });
 
 
+});
+
+describe("Telegram stickers, voice notes and mischief", () => {
+  async function withKit(voice = true) {
+    const t = await setup();
+    expect(await t.telegram.loadStickers()).toBe(3);
+    t.w.deps.expression = { stickers: t.telegram.stickerEmoji, ...(voice ? { speak: async () => new Uint8Array([1, 2, 3]) } : {}) };
+    return t;
+  }
+
+  it("loads the pack by emoji and sends a sticker of the mood she asked for", async () => {
+    const t = await withKit();
+    expect(t.telegram.stickerEmoji().sort()).toEqual(["😹", "😾"]);
+    t.w.script = () => "lmao\n<<sticker:😹>>";
+    await t.send("i fell off my chair");
+    await t.send("/agenda");
+    const sticker = t.methods.find((call) => call.method === "sendSticker")!;
+    expect(["cat-laugh-1", "cat-laugh-2"]).toContain(sticker.payload.sticker);
+    expect(t.sent[0]).toBe("lmao");
+  });
+
+  it("sends a voice note, and says it as text without stage directions when the voice fails", async () => {
+    const t = await withKit();
+    t.w.script = () => "<<voice:[sighs] fine. goodnight.>>";
+    await t.send("night");
+    await t.send("/agenda");
+    expect(t.methods.filter((call) => call.method === "sendVoice")).toHaveLength(1);
+
+    const broken = await withKit();
+    broken.w.deps.expression!.speak = async () => { throw new Error("voice provider returned 401"); };
+    broken.w.script = () => "<<voice:[sighs] fine. goodnight.>>";
+    await broken.send("night");
+    await broken.send("/agenda");
+    expect(broken.methods.filter((call) => call.method === "sendVoice")).toHaveLength(0);
+    expect(broken.sent[0]).toBe("fine. goodnight.");
+  });
+
+  it("pins a sulk only when she is annoyed and mischief is on, and takes it down on /mischief off", async () => {
+    const t = await withKit(false);
+    await t.send("/start");
+    const user = await t.user();
+    await updateUser(t.w.db, user.id, { bond: { irritation: 0.8, irritationAt: t.w.now.toISOString(), irritationReason: "ignored her" } });
+    t.w.script = () => "noted.\n<<pin:emi is not speaking to you>>";
+    await t.send("you're so dramatic");
+    await t.send("/agenda");
+    const pin = t.methods.find((call) => call.method === "pinChatMessage")!;
+    expect(pin.payload).toMatchObject({ chat_id: 42, disable_notification: true });
+    expect(t.sent).toContain("emi is not speaking to you");
+    expect(await activeMischief(t.w.db, user.id)).toHaveLength(1);
+
+    await t.send("/mischief off");
+    expect(t.methods.filter((call) => call.method === "unpinChatMessage")).toEqual([{ method: "unpinChatMessage", payload: { chat_id: "42", message_id: pin.payload.message_id } }]);
+    expect(t.methods.some((call) => call.method === "deleteMessage" && call.payload.message_id === pin.payload.message_id)).toBe(true);
+    expect(await activeMischief(t.w.db, user.id)).toHaveLength(0);
+    expect((await t.user()).mischief).toBe(false);
+  });
 });
 
 describe("Telegram reply snapshots", () => {

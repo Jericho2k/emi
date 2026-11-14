@@ -1,6 +1,6 @@
 import { PGlite } from "@electric-sql/pglite";
 import { vector } from "@electric-sql/pglite-pgvector";
-import type { Deps, Outbound, User } from "../src/core/types";
+import type { Deps, Outbound, User, Extras, MischiefAct } from "../src/core/types";
 import { getUser, userForChannel } from "../src/core/users";
 import { migrate, transactionalDb, type Db } from "../src/db";
 import { EMBEDDING_DIMENSIONS, type ChatMessage, type ChatOptions, type Llm } from "../src/llm/provider";
@@ -40,7 +40,9 @@ export interface World {
   calls: Array<{ messages: ChatMessage[]; options: ChatOptions }>;
   /** What the model says. Swap freely inside a test. */
   script: Script;
-  sent: Array<{ userId: string; bubbles: string[] }>;
+  sent: Array<{ userId: string; bubbles: string[]; extras?: Extras }>;
+  /** Playful changes the channel was asked to undo. */
+  undone: MischiefAct[];
   outbound: Outbound;
   hasKey: boolean;
   advance(ms: number): void;
@@ -52,7 +54,7 @@ export const HOUR = 3_600_000;
 export async function world(start = "2026-11-13T12:00:00Z"): Promise<World> {
   const db = await testDb();
   const w = {
-    db, now: new Date(start), calls: [], sent: [], hasKey: true,
+    db, now: new Date(start), calls: [], sent: [], undone: [], hasKey: true,
     script: () => "ok",
   } as unknown as World;
   const llm: Llm = {
@@ -69,7 +71,13 @@ export async function world(start = "2026-11-13T12:00:00Z"): Promise<World> {
     models: { writer: "writer", utility: "utility", embedding: "embedding" },
     llmFor: () => (w.hasKey ? llm : null),
   };
-  w.outbound = { send: async (userId, bubbles) => { w.sent.push({ userId, bubbles }); } };
+  w.outbound = {
+    send: async (userId, bubbles, extras) => {
+      w.sent.push({ userId, bubbles, ...(extras && Object.keys(extras).length ? { extras } : {}) });
+      return { ...(extras?.sticker ? { sticker: extras.sticker } : {}), ...(extras?.voice ? { voice: extras.voice } : {}) };
+    },
+    undo: async (_userId, act) => { w.undone.push(act); },
+  };
   w.advance = (ms) => { w.now = new Date(w.now.getTime() + ms); };
   let counter = 0;
   w.newUser = async (patch = {}) => {

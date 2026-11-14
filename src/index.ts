@@ -2,6 +2,7 @@ import pg from "pg";
 import { createTelegram } from "./channels/telegram";
 import { llmResolver, loadConfig } from "./config";
 import { tick } from "./core/proactive";
+import { elevenLabs, supportsAudioTags } from "./core/voice";
 import type { Deps } from "./core/types";
 import { migrate, pgDb } from "./db";
 
@@ -28,7 +29,15 @@ async function main() {
   if (applied.length) console.log(`[db] applied ${applied.join(", ")}`);
 
   const deps: Deps = { db, clock: () => new Date(), random: Math.random, models: config.models, llmFor: llmResolver(config) };
-  const { bot, outbound } = createTelegram(deps, config);
+  const telegram = createTelegram(deps, config);
+  const { bot, outbound } = telegram;
+  deps.expression = {
+    stickers: telegram.stickerEmoji,
+    speak: config.voice ? elevenLabs(config.voice) : undefined,
+    voiceTags: config.voice ? supportsAudioTags(config.voice.model) : false,
+  };
+  const stickerCount = await telegram.loadStickers();
+  console.log(`[emi] ${stickerCount} stickers, ${telegram.stickerEmoji().length} moods; voice ${config.voice ? "on" : "off"}`);
 
   let ticking = false;
   const timer = setInterval(async () => {
@@ -57,6 +66,7 @@ async function main() {
     { command: "memory", description: "What I know about you" },
     { command: "agenda", description: "What I'm planning to bring up" },
     { command: "initiative", description: "How often I write first" },
+    { command: "mischief", description: "Whether I may sulk in our chat" },
     { command: "usage", description: "What today has cost" },
     { command: "help", description: "Everything you can control" },
   ]);

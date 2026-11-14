@@ -6,7 +6,7 @@ import type { Recall } from "./memory/recall";
 import { bondLines, type BondSnapshot } from "./bond";
 import { arcLine } from "./memory/timeline";
 import { BUBBLE_SEPARATOR, PERSONA, REACTIONS } from "./persona";
-import type { AgendaItem, Memory, StoredMessage, User } from "./types";
+import type { AgendaItem, Extras, Memory, StoredMessage, User } from "./types";
 
 export type TurnKind = "social" | "task" | "mixed";
 
@@ -108,6 +108,8 @@ export interface TurnContext {
   historyImages?: Map<number, ImageInput[]>;
   /** How close they are and how she feels about them right now. */
   bond?: BondSnapshot;
+  /** What she may send besides text this turn: stickers, a voice note, a pinned sulk. */
+  allowance?: string[];
   /** What has been on her mind: today's line, or the latest before it is written. */
   onHerMind?: { thought: string; today: boolean } | null;
 }
@@ -156,6 +158,7 @@ export function contextBlock(context: TurnContext): string {
       lines.push(`- ${agendaLabel(index)}: ${item.about}${whenText}${item.reason ? `. Why you care: ${item.reason}` : ""}`);
     });
   }
+  if (context.allowance?.length) lines.push("", ...context.allowance);
   if (turnKind !== "task" && context.habits?.length) lines.push("", ...context.habits);
   lines.push("", turnKind === "task" ? "This message looks like a task: answer it fully in one message."
     : turnKind === "mixed" ? "This message looks like a question inside a chat: answer it properly, in your own voice."
@@ -204,7 +207,17 @@ export interface ParsedReply {
   used: string[];
   /** An emoji reaction on their last message, if she gave one. */
   reaction?: string;
+  /** Asked for, not yet allowed: the pipeline checks these against what she may send. */
+  extras: Extras;
 }
+
+const STICKER_TAG = /<<\s*sticker\s*:\s*([^>\s]{1,16})\s*>>/gi;
+const VOICE_TAG = /<<\s*voice\s*:\s*([^>]{1,500}?)\s*>>/gi;
+const PIN_TAG = /<<\s*pin\s*:\s*([^>]{1,200}?)\s*>>/gi;
+// The stored forms, in case the writer copies her own history.
+const STICKER_LINE = /^\s*\[sent sticker ([^\]\s]{1,16})\]\s*$/gim;
+const VOICE_LINE = /^\s*\[voice note: (.{1,500}?)\]\s*$/gim;
+const PIN_LINE = /^\s*\[pinned: (.{1,200}?)\]\s*$/gim;
 
 const REACT_TAG = /<<\s*react\s*:\s*([^>\s]{1,16})\s*>>/gi;
 /** The form a reaction takes in stored history, in case the writer echoes it. */
@@ -216,10 +229,9 @@ export function normalizeReaction(raw: string): string | undefined {
   return (REACTIONS as readonly string[]).includes(emoji) ? emoji : undefined;
 }
 
-/** How a reply with a reaction is stored, so she later sees that she reacted. */
-export function storedReply(bubbles: string[], reaction?: string): string {
-  const text = joinBubbles(bubbles);
-  return reaction ? `[reacted with ${reaction}]${text ? `\n${text}` : ""}` : text;
+/** How a reply is stored, so she later sees that she reacted, and what else she sent. */
+export function storedReply(bubbles: string[], reaction?: string, markers: string[] = []): string {
+  return [...(reaction ? [`[reacted with ${reaction}]`] : []), ...(bubbles.length ? [joinBubbles(bubbles)] : []), ...markers].join("\n");
 }
 
 export const MAX_BUBBLES = 3;
@@ -237,15 +249,24 @@ export function parseReply(raw: string, turnKind: TurnKind): ParsedReply {
     reaction ??= normalizeReaction(emoji);
     return "";
   };
+  const extras: Extras = {};
+  const take = (key: keyof Extras) => (_: string, value: string) => {
+    extras[key] ??= value.trim();
+    return "";
+  };
   let text = raw.replace(USED_TAG, (_, ids: string) => {
     used.push(...ids.split(",").map((id) => id.trim().toLowerCase()).filter(Boolean));
     return "";
-  }).replace(REACT_TAG, react).replace(REACTED_LINE, react);
-  const result = (parsed: Omit<ParsedReply, "used" | "reaction">): ParsedReply => {
+  }).replace(REACT_TAG, react).replace(REACTED_LINE, react)
+    .replace(STICKER_TAG, take("sticker")).replace(STICKER_LINE, take("sticker"))
+    .replace(VOICE_TAG, take("voice")).replace(VOICE_LINE, take("voice"))
+    .replace(PIN_TAG, take("pin")).replace(PIN_LINE, take("pin"));
+  const asked = Object.keys(extras).length > 0;
+  const result = (parsed: Omit<ParsedReply, "used" | "reaction" | "extras">): ParsedReply => {
     // She meant to only react, with an emoji no channel allows: the plainest one
     // says the same, and the raw tag must never reach the chat.
-    if (!parsed.bubbles.length && !reaction && triedReaction) reaction = "👍";
-    return { ...parsed, used, ...(reaction ? { reaction } : {}) };
+    if (!parsed.bubbles.length && !reaction && triedReaction && !asked) reaction = "👍";
+    return { ...parsed, used, extras, ...(reaction ? { reaction } : {}) };
   };
   text = text.replace(/<\/?notes>/gi, "").replace(TIMESTAMP, "").trim();
 
