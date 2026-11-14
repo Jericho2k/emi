@@ -292,6 +292,24 @@ If you write first, she raises a follow-up or initiative in that conversation, a
 
 **Long history** (`src/core/memory/timeline.ts`). The writer sees the newest 30 to 49 messages in full. When a block of 20 leaves that window, one cheap call writes an arc for exactly those messages: a chapter summary and a one-line headline. The newest arcs appear as headlines; a run of six arcs is folded once into a chapter, and a run of six chapters once into a part. Nothing folded is summarised again, so the order of events cannot drift, and the record grows only logarithmically with the length of the chat. It sits right after the persona in the prompt and changes only when a block is consolidated. When a turn is about an old chapter, that chapter's full summary is added to the turn's notes.
 
+**Reset boundary** (`src/core/conversation.ts`). `/wipe yes` atomically advances a
+conversation version and deletes its messages, image bytes/descriptions, memories,
+agenda and timeline, while resetting mood, closeness and inner days. Settings,
+the API key and the usage ledger stay. The confirmation is the first stored
+message of the new conversation. Telegram's visible chat is not deleted; explicitly
+replying to an old message supplies its quoted content again.
+
+Every background entry point captures a version with `inConversation` and passes
+those scoped dependencies to its children. Their database operations lock and
+check that version in the same transaction as the operation. A pre-wipe result
+can neither restore old state nor continue into a child job under a new version.
+New jobs can start immediately in the new conversation. Model requests do not
+hold database locks; already-billed requests can finish, but their stale results
+are discarded and their costs remain in `/usage`. Outgoing sends are serialized
+with reset: a send already begun completes before wipe confirms, and a stale
+composition cannot start sending afterward. Migration
+`0007_conversation_version.sql` applies automatically at startup.
+
 One limit to know: `/forget` erases a memory, but a chapter summary written earlier may still mention the same fact. `/wipe` erases everything.
 
 ## Deploy on Railway

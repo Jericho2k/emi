@@ -199,7 +199,7 @@ describe("texting rhythm", () => {
 describe("her days", () => {
   it("writes one line a day of what's on her mind, continues threads, and shows it to her", async () => {
     const w = await world();
-    const person = await w.newUser();
+    const person = await w.newUser({ lastUserMessageAt: w.now });
     w.script = byModel({ utility: JSON.stringify({ thought: "can't stop thinking about how octopuses taste with their arms" }) });
     expect(await ensureInnerDay(w.deps, person.id)).toContain("octopuses");
     const calls = w.calls.length;

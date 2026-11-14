@@ -1,6 +1,7 @@
 import { z } from "zod";
 import type { Db } from "../db";
 import { LlmResponseError, parseJsonObject } from "../llm/provider";
+import { ConversationReset, inConversation } from "./conversation";
 import { planWindows } from "./agenda/policy";
 import { awaitingReaction, pendingItems, setStatus, upsertAgendaItem } from "./agenda/store";
 import { describeMoment, hasTimeOfDay, isValidTimeZone, localParts, localToUtc } from "./clock";
@@ -118,7 +119,7 @@ const ForgetSchema = z.object({ id: z.string(), evidence: text(500) });
 const list = <T>(schema: z.ZodType<T>, value: unknown, max: number): T[] =>
   (Array.isArray(value) ? value : []).map((item) => schema.safeParse(item)).flatMap((r) => (r.success ? [r.data] : [])).slice(0, max);
 
-const running = new Set<string>();
+const running = new WeakSet<Db>();
 // Failed extraction keeps its cursor, but a persistent provider outage must not
 // become a paid request every 30 seconds. Backoff is per database and person.
 const failures = new WeakMap<Db, Map<string, { count: number; retryAt: number }>>();
@@ -133,14 +134,18 @@ export interface ExtractionSummary {
 }
 
 export async function runExtraction(deps: Deps, userId: string, hint: { memoryIds?: string[] } = {}): Promise<ExtractionSummary | null> {
-  if (running.has(userId) || (failures.get(deps.db)?.get(userId)?.retryAt ?? 0) > deps.clock().getTime()) return null;
-  running.add(userId);
+  return inConversation(deps, userId, (deps) => extractOnce(deps, userId, hint));
+}
+
+async function extractOnce(deps: Deps, userId: string, hint: { memoryIds?: string[] } = {}): Promise<ExtractionSummary | null> {
+  if (running.has(deps.db) || (failures.get(deps.db)?.get(userId)?.retryAt ?? 0) > deps.clock().getTime()) return null;
+  running.add(deps.db);
   try {
     const summary = await extract(deps, userId, hint.memoryIds ?? []);
     if (summary) failures.get(deps.db)?.delete(userId);
     return summary;
   } finally {
-    running.delete(userId);
+    running.delete(deps.db);
   }
 }
 
@@ -202,6 +207,7 @@ async function extract(deps: Deps, userId: string, hintIds: string[]): Promise<E
     data = parsed as Record<string, unknown>;
     await recordUsage(db, userId, "extraction", result.usage, now);
   } catch (error) {
+    if (error instanceof ConversationReset) throw error;
     if (error instanceof LlmResponseError) await recordUsage(db, userId, "extraction_failed", error.usage, now);
     const state = failures.get(db) ?? new Map<string, { count: number; retryAt: number }>();
     const count = (state.get(userId)?.count ?? 0) + 1;

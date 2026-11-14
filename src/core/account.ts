@@ -1,5 +1,6 @@
 import type { ImageMime } from "./images";
 import type { Db } from "../db";
+import { rootDb } from "./conversation";
 
 /**
  * Everything Emi holds about a person, and the way to erase it. Independent
@@ -49,13 +50,17 @@ export async function exportAccount(db: Db, userId: string, now: Date): Promise<
  * key and the usage ledger stay, so the person can simply start again.
  */
 export async function wipeAccount(db: Db, userId: string): Promise<void> {
-  for (const table of ["agenda_items", "timeline_entries", "arcs", "memories", "messages"]) {
-    await db.query(`delete from ${table} where user_id = $1`, [userId]);
-  }
-  await db.query(
-    `update users set mood = '{}'::jsonb, bond = '{}'::jsonb, inner_days = '[]'::jsonb, last_spontaneous_at = null,
-       brushoff_count = 0, extracted_through = 0, consolidated_through = 0,
-       last_user_message_at = null, last_emi_message_at = null, last_planned_on = null where id = $1`,
-    [userId],
-  );
+  await rootDb(db).transaction(async (tx) => {
+    // Lock first and invalidate old work in the same atomic deletion.
+    await tx.query("update users set conversation_version = conversation_version + 1 where id = $1", [userId]);
+    for (const table of ["agenda_items", "timeline_entries", "arcs", "memories", "messages"]) {
+      await tx.query(`delete from ${table} where user_id = $1`, [userId]);
+    }
+    await tx.query(
+      `update users set mood = '{}'::jsonb, bond = '{}'::jsonb, inner_days = '[]'::jsonb, last_spontaneous_at = null,
+         brushoff_count = 0, extracted_through = 0, consolidated_through = 0,
+         last_user_message_at = null, last_emi_message_at = null, last_planned_on = null where id = $1`,
+      [userId],
+    );
+  });
 }

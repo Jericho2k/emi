@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { LlmResponseError, parseJsonObject, type ChatMessage } from "../llm/provider";
+import { ConversationReset, conversationEffect, inConversation } from "./conversation";
 import { DAILY_PING_BUDGET, SILENCE_HOURS } from "./agenda/policy";
 import { claimDuePings, expireStale, hasOpenInitiative, setPing, setStatus, upsertAgendaItem } from "./agenda/store";
 import { bondLines, bondSnapshot, currentIrritation, IRRITATION_HOLDS_INITIATIVE, type BondSnapshot } from "./bond";
@@ -13,7 +14,7 @@ import { webContext } from "./web";
 import { PERSONA } from "./persona";
 import { joinBubbles, parseReply, renderHistory } from "./prompt";
 import type { AgendaItem, Deps, Outbound, User } from "./types";
-import { addMessage, getUser, proactiveSentToday, recentMessages, recordUsage, underDailyCap, updateUser, userFromRow } from "./users";
+import { addMessage, getUser, proactiveSentToday, recentMessages, recordUsage, underDailyCap, updateUser } from "./users";
 
 const HOUR = 3_600_000;
 const MINUTE = 60_000;
@@ -96,6 +97,7 @@ async function compose(deps: Deps, user: User, item: AgendaItem, now: Date): Pro
     const { bubbles } = parseReply(reply.text, "social");
     return bubbles.length ? bubbles : null;
   } catch (error) {
+    if (error instanceof ConversationReset) throw error;
     if (error instanceof LlmResponseError) await recordUsage(deps.db, user.id, "proactive_failed", error.usage, now);
     console.warn("[proactive] compose failed", error instanceof Error ? error.message : error);
     // A reminder is a promise, so it goes out even when the model does not.
@@ -107,27 +109,39 @@ export async function runDuePings(deps: Deps, outbound: Outbound): Promise<numbe
   const now = deps.clock();
   let sent = 0;
   for (const item of await claimDuePings(deps.db, now)) {
-    try {
-      const user = await getUser(deps.db, item.userId);
-      if (!user) continue;
-      const verdict = await pingVerdict(deps, user, item, now);
-      if (!verdict.send) {
-        await setPing(deps.db, item.id, verdict.retryAt, now);
-        continue;
+    const delivered = await inConversation(deps, item.userId, async (deps) => {
+      try {
+        // The lease may have been selected before a wipe on another worker.
+        const { rows } = await deps.db.query("select id from agenda_items where id = $1 and user_id = $2 and status = 'pending'", [item.id, item.userId]);
+        if (!rows.length) return false;
+        const user = await getUser(deps.db, item.userId);
+        if (!user) return false;
+        const verdict = await pingVerdict(deps, user, item, now);
+        if (!verdict.send) {
+          await setPing(deps.db, item.id, verdict.retryAt, now);
+          return false;
+        }
+        const bubbles = await compose(deps, user, item, now);
+        if (!bubbles) {
+          await setStatus(deps.db, item.id, "cancelled", "held: no longer fit the conversation", now);
+          return false;
+        }
+        // A send already begun completes before wipe confirms. A composition
+        // still in flight when wipe wins never sends or saves its old content.
+        await conversationEffect(deps.db, async () => {
+          await outbound.send(user.id, bubbles);
+          await addMessage(deps.db, { userId: user.id, role: "emi", content: joinBubbles(bubbles), kind: "proactive", agendaItemId: item.id, at: now });
+          await setStatus(deps.db, item.id, item.kind === "reminder" ? "done" : "pinged", "sent", now);
+        });
+        return true;
+      } catch (error) {
+        if (error instanceof ConversationReset) throw error;
+        // The ten-minute lease expires and the item is tried again.
+        console.warn("[proactive] ping failed", item.id, error instanceof Error ? error.message : error);
+        return false;
       }
-      const bubbles = await compose(deps, user, item, now);
-      if (!bubbles) {
-        await setStatus(deps.db, item.id, "cancelled", "held: no longer fit the conversation", now);
-        continue;
-      }
-      await outbound.send(user.id, bubbles);
-      await addMessage(deps.db, { userId: user.id, role: "emi", content: joinBubbles(bubbles), kind: "proactive", agendaItemId: item.id, at: now });
-      await setStatus(deps.db, item.id, item.kind === "reminder" ? "done" : "pinged", "sent", now);
-      sent += 1;
-    } catch (error) {
-      // The ten-minute lease expires and the item is tried again.
-      console.warn("[proactive] ping failed", item.id, error instanceof Error ? error.message : error);
-    }
+    });
+    if (delivered) sent += 1;
   }
   return sent;
 }
@@ -180,17 +194,25 @@ export async function runDailyPlanner(deps: Deps): Promise<number> {
     [new Date(now.getTime() - 7 * 24 * HOUR)],
   );
   let planned = 0;
-  for (const user of rows.map(userFromRow)) {
-    const local = localParts(now, user.timezone);
-    if (user.lastPlannedOn === local.dateKey || local.hour < 9 || local.hour >= 20) continue;
-    // Marked before the work, so a failure costs one day, not a retry loop.
-    await updateUser(deps.db, user.id, { lastPlannedOn: local.dateKey });
-    try {
-      if (await planFor(deps, user, now)) planned += 1;
-    } catch (error) {
-      if (error instanceof LlmResponseError) await recordUsage(deps.db, user.id, "planner_failed", error.usage, now);
-      console.warn("[planner] failed", user.id, error instanceof Error ? error.message : error);
-    }
+  for (const row of rows) {
+    const made = await inConversation(deps, String(row.id), async (deps) => {
+      // Re-read after capturing the version, rather than using a pre-wipe snapshot.
+      const user = await getUser(deps.db, String(row.id));
+      if (!user?.lastUserMessageAt || user.initiative === "off" || !user.timezoneKnown
+        || user.lastUserMessageAt.getTime() < now.getTime() - 7 * 24 * HOUR) return false;
+      const local = localParts(now, user.timezone);
+      if (user.lastPlannedOn === local.dateKey || local.hour < 9 || local.hour >= 20) return false;
+      // Marked before the work, so a failure costs one day, not a retry loop.
+      await updateUser(deps.db, user.id, { lastPlannedOn: local.dateKey });
+      try { return await planFor(deps, user, now); }
+      catch (error) {
+        if (error instanceof ConversationReset) throw error;
+        if (error instanceof LlmResponseError) await recordUsage(deps.db, user.id, "planner_failed", error.usage, now);
+        console.warn("[planner] failed", user.id, error instanceof Error ? error.message : error);
+        return false;
+      }
+    });
+    if (made) planned += 1;
   }
   return planned;
 }
