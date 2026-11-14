@@ -1,3 +1,4 @@
+import type { ImageMime } from "./images";
 import type { Db } from "../db";
 
 /**
@@ -12,9 +13,10 @@ export interface AccountExport {
   agenda: unknown[];
   timeline: { arcs: unknown[]; entries: unknown[] };
   messages: unknown[];
+  images: Array<{ id: string; message_id: number; position: number; mime_type: ImageMime; origin: "reply" | null; byte_size: number }>;
 }
 
-/** A complete copy of the person's data. The API key is never included. */
+/** Archive manifest. The channel exports original images via the scoped loader. */
 export async function exportAccount(db: Db, userId: string, now: Date): Promise<AccountExport> {
   const one = async (sql: string) => (await db.query(sql, [userId])).rows;
   const [settings] = await one(
@@ -34,7 +36,9 @@ export async function exportAccount(db: Db, userId: string, now: Date): Promise<
       arcs: await one("select started_at, ended_at, headline, summary from arcs where user_id = $1 order by end_message_id"),
       entries: await one("select level, started_at, ended_at, summary from timeline_entries where user_id = $1 order by level desc, end_message_id"),
     },
-    messages: await one("select role, kind, content, reply_context, created_at from messages where user_id = $1 order by id"),
+    images: (await db.query<AccountExport["images"][number]>(`select i.id, i.message_id, i.position, i.mime_type, i.origin, octet_length(i.data) as byte_size
+      from message_images i join messages m on m.id = i.message_id where m.user_id = $1 order by m.id, i.position`, [userId])).rows,
+    messages: await one("select id, role, kind, content, reply_context, created_at from messages where user_id = $1 order by id"),
   };
 }
 

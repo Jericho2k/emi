@@ -1,6 +1,7 @@
 import { vectorLiteral, type Db } from "../../db";
 import { LlmResponseError, parseJsonObject } from "../../llm/provider";
 import { describeDay, localParts } from "../clock";
+import { IMAGE_REFERENCES_SQL } from "../images";
 import { messageContent } from "../message";
 import { historyWindow } from "../prompt";
 import type { Deps, User } from "../types";
@@ -208,7 +209,7 @@ async function consolidate(deps: Deps, userId: string): Promise<ConsolidationRes
   );
   const firstVisible = Number(first.rows[0]?.id ?? 0);
   const { rows } = await db.query<Row>(
-    "select * from messages where user_id = $1 and id > $2 and id < $3 order by id asc limit $4",
+    `select messages.*, ${IMAGE_REFERENCES_SQL} from messages where user_id = $1 and id > $2 and id < $3 order by id asc limit $4`,
     [userId, user.consolidatedThrough, firstVisible, MAX_BATCH],
   );
   if (rows.length < MIN_BATCH) return { arcs: 0, folds: 0 };
@@ -226,7 +227,7 @@ async function consolidate(deps: Deps, userId: string): Promise<ConsolidationRes
 
   const transcript = spoken.map((row) => {
     const at = localParts(toDate(row.created_at), user.timezone);
-    const content = messageContent({ id: Number(row.id), role: row.role, content: row.content, kind: row.kind, replyTo: row.reply_context ?? undefined, agendaItemId: null, createdAt: toDate(row.created_at) });
+    const content = messageContent({ id: Number(row.id), role: row.role, content: row.content, images: row.images, kind: row.kind, replyTo: row.reply_context ?? undefined, agendaItemId: null, createdAt: toDate(row.created_at) });
     return `[${at.dateKey} ${String(at.hour).padStart(2, "0")}:${String(at.minute).padStart(2, "0")}] ${row.role === "user" ? "THEM" : "EMI"}: ${content.slice(0, 1200)}`;
   }).join("\n");
 

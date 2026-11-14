@@ -12,6 +12,7 @@ const Env = z.object({
   EMI_WEB_ENABLED: z.enum(["true", "false"]).default("true"),
   EMI_ALLOWED_TELEGRAM_IDS: z.string().optional(),
   EMI_WRITER_MODEL: z.string().default("deepseek/deepseek-v4.1-flash"),
+  EMI_VISION_MODEL: z.string().optional(),
   EMI_UTILITY_MODEL: z.string().default("z-ai/glm-5.3-flash"),
   EMI_EMBEDDING_MODEL: z.string().default("qwen/qwen3-embedding-8b"),
 });
@@ -41,7 +42,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     masterKey: parseMasterKey(e.EMI_MASTER_KEY),
     sharedKey: e.EMI_SHARED_OPENROUTER_KEY?.trim() || null,
     allowedTelegramIds: ids.length ? new Set(ids) : null,
-    models: { writer: e.EMI_WRITER_MODEL, utility: e.EMI_UTILITY_MODEL, embedding: e.EMI_EMBEDDING_MODEL },
+    models: { writer: e.EMI_WRITER_MODEL, vision: e.EMI_VISION_MODEL?.trim() || e.EMI_WRITER_MODEL, utility: e.EMI_UTILITY_MODEL, embedding: e.EMI_EMBEDDING_MODEL },
   };
 }
 

@@ -1,5 +1,6 @@
 import type { ChatMessage } from "../llm/provider";
 import { describeDay, describeGap, describeMoment, localParts } from "./clock";
+import type { ImageInput } from "./images";
 import { messageContent } from "./message";
 import type { Recall } from "./memory/recall";
 import { arcLine } from "./memory/timeline";
@@ -44,11 +45,15 @@ const TIMESTAMP = /^\s*\[[^\]\n]{3,40}\]\s*/;
  * whenever the day changed or an hour passed, derived only from stored
  * times so the same history always renders the same way.
  */
-export function renderHistory(history: StoredMessage[], tz: string): ChatMessage[] {
+export function renderHistory(history: StoredMessage[], tz: string, imageContext?: Map<number, ImageInput[]>): ChatMessage[] {
   const out: ChatMessage[] = [];
   let previous: Date | null = null;
   for (const message of history) {
     let content = messageContent(message);
+    const images = imageContext?.get(message.id);
+    if (message.images?.length && (images?.length ?? 0) < message.images.length) {
+      content += `\n[${images?.length ?? 0} of ${message.images.length} original images included in this turn; omitted pixels cannot be inspected.]`;
+    }
     if (message.role === "user") {
       const newDay = !previous || localParts(previous, tz).dateKey !== localParts(message.createdAt, tz).dateKey;
       const longGap = previous && message.createdAt.getTime() - previous.getTime() > 3_600_000;
@@ -61,8 +66,10 @@ export function renderHistory(history: StoredMessage[], tz: string): ChatMessage
     const last = out[out.length - 1];
     // Providers want turns to alternate, and two in a row from one side are
     // one turn anyway.
-    if (last && last.role === role) last.content += `\n${role === "assistant" ? `${BUBBLE_SEPARATOR}\n` : ""}${content}`;
-    else out.push({ role, content });
+    if (last && last.role === role) {
+      last.content += `\n${role === "assistant" ? `${BUBBLE_SEPARATOR}\n` : ""}${content}`;
+      if (images?.length) last.images = [...(last.images ?? []), ...images];
+    } else out.push({ role, content, ...(images?.length ? { images } : {}) });
   }
   return out;
 }
@@ -89,6 +96,8 @@ export interface TurnContext {
   habits?: string[];
   /** The permanent record of older conversation. Changes only when a block is consolidated. */
   timeline?: string;
+  images?: ImageInput[];
+  historyImages?: Map<number, ImageInput[]>;
 }
 
 /** The notes that change every turn. They go last so everything above stays cacheable. */
@@ -154,11 +163,13 @@ export function replyHabits(history: StoredMessage[]): string[] {
 
 export function buildTurnMessages(context: TurnContext, history: StoredMessage[], userText: string): ChatMessage[] {
   context = { ...context, habits: context.habits ?? replyHabits(history) };
-  const messages: ChatMessage[] = [{ role: "system", content: context.timeline ? `${PERSONA}\n\n${context.timeline}` : PERSONA }, ...renderHistory(history, context.user.timezone)];
+  const messages: ChatMessage[] = [{ role: "system", content: context.timeline ? `${PERSONA}\n\n${context.timeline}` : PERSONA }, ...renderHistory(history, context.user.timezone, context.historyImages)];
   const final = `${contextBlock(context)}\n\n${userText}`;
   const last = messages[messages.length - 1];
-  if (last && last.role === "user") last.content += `\n${final}`;
-  else messages.push({ role: "user", content: final });
+  if (last && last.role === "user") {
+    last.content += `\n${final}`;
+    if (context.images?.length) last.images = [...(last.images ?? []), ...context.images];
+  } else messages.push({ role: "user", content: final, ...(context.images?.length ? { images: context.images } : {}) });
   return messages;
 }
 

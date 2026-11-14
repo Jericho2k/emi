@@ -1,9 +1,11 @@
 import { Bot, InputFile, type Context } from "grammy";
+import type { Message } from "grammy/types";
 import type { Config } from "../config";
 import { exportAccount, wipeAccount } from "../core/account";
 import { pendingItems } from "../core/agenda/store";
 import { describeMoment, isValidTimeZone } from "../core/clock";
 import { runExtraction } from "../core/extraction";
+import { ImageInputError, MAX_TURN_IMAGES, loadImages, validateImages } from "../core/images";
 import { encryptKey } from "../core/keys";
 import { runConsolidation } from "../core/memory/timeline";
 import { activeMemories, deleteMemory, findByShortId, insertMemory } from "../core/memory/store";
@@ -11,6 +13,7 @@ import { handleTurn } from "../core/pipeline";
 import { INITIATIVE_LEVELS, type Deps, type Initiative, type IncomingMessage, type Outbound, type User } from "../core/types";
 import { addMessage, chatIdFor, getUser, spentToday, updateUser, userForChannel } from "../core/users";
 import { chunkText, toTelegramHtml } from "./telegram-format";
+import { telegramImages, telegramImageFile } from "./telegram-images";
 import { telegramInput } from "./telegram-input";
 
 const CHANNEL = "telegram";
@@ -66,7 +69,8 @@ export function createTelegram(deps: Deps, config: Config): { bot: Bot; outbound
   // Commands share the turn queue so their state changes and confirmations
   // cannot overtake a buffered message or an in-flight model reply.
   const chains = new Map<string, Promise<void>>();
-  const pending = new Map<string, { messages: IncomingMessage[]; chatId: number; timer: NodeJS.Timeout }>();
+  type PendingInput = { input: IncomingMessage; message: Message };
+  const pending = new Map<string, { messages: PendingInput[]; chatId: number; timer: NodeJS.Timeout }>();
 
   function enqueue(userId: string, work: () => Promise<unknown>): Promise<void> {
     const next = (chains.get(userId) ?? Promise.resolve()).catch(() => undefined).then(work).then(() => undefined);
@@ -196,7 +200,18 @@ export function createTelegram(deps: Deps, config: Config): { bot: Bot; outbound
 
   command("export", async (ctx, user, _arg, reply) => {
     const data = await exportAccount(deps.db, user.id, deps.clock());
-    await ctx.replyWithDocument(new InputFile(Buffer.from(JSON.stringify(data, null, 2)), "emi-export.json"));
+    // Export images as their original files instead of inflating one JSON
+    // document past Telegram's file-size limit with embedded base64 bytes.
+    const images = data.images;
+    const suffix: Record<string, string> = { "image/png": "png", "image/jpeg": "jpg", "image/webp": "webp", "image/gif": "gif" };
+    const filename = (image: Pick<typeof images[number], "id" | "mime_type">) => `emi-image-${image.id}.${suffix[image.mime_type]}`;
+    const manifest = { ...data, images: images.map((image) => ({ ...image, file: filename(image) })) };
+    await ctx.replyWithDocument(new InputFile(Buffer.from(JSON.stringify(manifest, null, 2)), "emi-export.json"));
+    for (const image of images) {
+      const [original] = await loadImages(deps.db, user.id, [{ id: image.id, mimeType: image.mime_type, byteSize: image.byte_size }]);
+      if (!original) throw new Error("export image is no longer available");
+      await ctx.replyWithDocument(new InputFile(original.data, filename(image)));
+    }
     return reply("that's everything: messages, memories, plans and settings. your API key is not in it.");
   });
 
@@ -210,10 +225,19 @@ export function createTelegram(deps: Deps, config: Config): { bot: Bot; outbound
 
   // ---- conversation ----
 
-  async function runTurn(userId: string, chatId: number, messages: IncomingMessage[]): Promise<void> {
+  async function runTurn(userId: string, chatId: number, batch: PendingInput[]): Promise<void> {
     const typing = setInterval(() => void bot.api.sendChatAction(chatId, "typing").catch(() => undefined), 4500);
     void bot.api.sendChatAction(chatId, "typing").catch(() => undefined);
     try {
+      // Register arrivals before doing I/O so photos, album entries and nearby
+      // text stay in order even when Telegram downloads are slow.
+      const fileCount = batch.reduce((count, item) => count + Number(!!telegramImageFile(item.message)) + Number(!!telegramImageFile(item.message.reply_to_message)), 0);
+      if (fileCount > MAX_TURN_IMAGES) throw new ImageInputError(`send up to ${MAX_TURN_IMAGES} images at once.`);
+      const messages: IncomingMessage[] = [];
+      for (const item of batch) {
+        messages.push(await telegramImages(bot.api, config.telegramToken, item.message, item.input));
+        validateImages(messages.flatMap((message) => message.images ?? []));
+      }
       const result = await handleTurn(deps, userId, messages);
       clearInterval(typing);
       await sendBubbles(chatId, result.bubbles);
@@ -223,6 +247,12 @@ export function createTelegram(deps: Deps, config: Config): { bot: Bot; outbound
           .catch((error) => console.warn("[background]", error));
       }
     } catch (error) {
+      if (error instanceof ImageInputError) {
+        for (const item of batch) await addMessage(deps.db, { userId, role: "user", content: item.input.text || "[Image upload unavailable]", replyTo: item.input.replyTo, at: deps.clock() });
+        await bot.api.sendMessage(chatId, error.message);
+        await addMessage(deps.db, { userId, role: "emi", content: error.message, kind: "command", at: deps.clock() });
+        return;
+      }
       console.error("[turn] failed", error);
       await bot.api.sendMessage(chatId, "something broke on my side. try that again in a moment.").catch(() => undefined);
     } finally {
@@ -230,21 +260,20 @@ export function createTelegram(deps: Deps, config: Config): { bot: Bot; outbound
     }
   }
 
-  bot.on("message:text", async (ctx) => {
-    if (ctx.message.text.startsWith("/")) return;
+  bot.on("message", async (ctx) => {
+    if (ctx.message.text?.startsWith("/")) return;
     const user = await userOf(ctx);
     if (!user) return;
+    if (!ctx.message.text && !telegramImageFile(ctx.message)) {
+      await ctx.reply("I can read text and images for now. send a photo or a PNG, JPEG, WebP or GIF file.");
+      return;
+    }
     const chatId = ctx.chat.id;
     const entry = pending.get(user.id) ?? { messages: [], chatId, timer: setTimeout(() => undefined, 0) };
     clearTimeout(entry.timer);
-    entry.messages.push(telegramInput(ctx.message, ctx.me.id));
+    entry.messages.push({ input: telegramInput(ctx.message, ctx.me.id), message: ctx.message });
     entry.timer = setTimeout(() => flushPending(user.id), DEBOUNCE_MS);
     pending.set(user.id, entry);
-  });
-
-  bot.on("message", async (ctx) => {
-    if (ctx.message.text || !(await userOf(ctx))) return;
-    await ctx.reply("i can only read text for now.");
   });
 
   bot.catch((error) => console.error("[telegram]", error.message));
