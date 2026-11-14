@@ -4,6 +4,7 @@ import { conversationDeps, ConversationReset, inConversation } from "./conversat
 import { absorbOnUserMessage, openForWeave, setStatus } from "./agenda/store";
 import { bondSnapshot } from "./bond";
 import { runExtraction } from "./extraction";
+import { allowance, allowanceLines, permitted, storedExtras } from "./expression";
 import { ensureInnerDay, onHerMind } from "./inner";
 import { recall } from "./memory/recall";
 import { runConsolidation, timelineFor } from "./memory/timeline";
@@ -11,7 +12,7 @@ import { agendaLabel, buildTurnMessages, classifyTurn, historyWindow, parseReply
 import { imageHistory, validateImages, VISION_CONTEXT } from "./images";
 import { prepareImages } from "./image-prep";
 import { messageContent } from "./message";
-import type { Deps, IncomingMessage } from "./types";
+import type { Deps, Extras, IncomingMessage } from "./types";
 import { attachSources, webContext } from "./web";
 import { addMessage, getUser, messageCount, recentMessages, recordUsage } from "./users";
 
@@ -20,6 +21,8 @@ export interface TurnResult {
   bubbles: string[];
   /** An emoji reaction to put on their last message. */
   reaction?: string;
+  /** A sticker, voice note or pinned sulk she may send, already checked against today's allowance. */
+  extras?: Extras;
   turnKind: TurnKind;
   /** Set when no reply could be written; `bubbles` then holds a plain notice. */
   problem?: "no_key" | "key_rejected" | "model_unavailable";
@@ -85,10 +88,12 @@ export async function handleTurn(deps: Deps, userId: string, input: string | Inc
     // Word matching alone still recalls; a reply never waits on embeddings.
   }
   const recalled = await recall(db, userId, text, queryVector, now);
+  const allowed = await allowance(deps, user, now);
 
   const messages = buildTurnMessages({
     user, now, recall: recalled, weave, turnKind, previousUserAt, timeline: await timelineFor(db, user),
     bond: await bondSnapshot(db, user, now), onHerMind: onHerMind(user, now),
+    allowance: allowanceLines(allowed, deps.expression?.voiceTags, text),
     images, historyImages: await imageHistory(db, userId, history, images, now),
     hasPriorConversation: history.length > 0 || incoming.some((message) => !!message.replyTo),
   }, history, content);
@@ -120,15 +125,20 @@ export async function handleTurn(deps: Deps, userId: string, input: string | Inc
   await recordUsage(db, userId, "reply", reply.usage, now);
 
   const parsed = parseReply(reply.text, turnKind);
-  const reactionOnly = !parsed.bubbles.length && !!parsed.reaction;
-  const bubbles = attachSources(parsed.bubbles.length || reactionOnly ? parsed.bubbles : [reply.text.trim()], reply.citations);
+  const { extras, asText } = permitted(parsed.extras, allowed);
+  const written = [...parsed.bubbles, ...asText];
+  // A reaction, a sticker or a voice note can be the whole reply.
+  const wordless = !written.length && !!(parsed.reaction || extras.sticker || extras.voice || extras.pin);
+  const bubbles = attachSources(written.length || wordless ? written : [reply.text.trim()], reply.citations);
   for (const [index, item] of weave.entries()) {
     if (parsed.used.includes(agendaLabel(index))) await setStatus(db, item.id, "woven", "brought up in conversation", now);
   }
-  await addMessage(db, { userId, role: "emi", content: storedReply(bubbles, parsed.reaction), at: deps.clock() });
+  const markers = storedExtras({ ...extras, ...(extras.pin ? { pinned: { text: extras.pin, detail: {} } } : {}) });
+  await addMessage(db, { userId, role: "emi", content: storedReply(bubbles, parsed.reaction, markers), at: deps.clock() });
 
   return {
     bubbles, turnKind, ...(parsed.reaction ? { reaction: parsed.reaction } : {}),
+    ...(Object.keys(extras).length ? { extras } : {}),
     recalledIds: [...recalled.standing, ...recalled.relevant, ...recalled.us, ...recalled.self].map((memory) => memory.id),
   };
 }

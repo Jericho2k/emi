@@ -28,7 +28,8 @@ import { activeMemories } from "../src/core/memory/store";
 import { runConsolidation, timelineFor } from "../src/core/memory/timeline";
 import { handleTurn } from "../src/core/pipeline";
 import { tick } from "../src/core/proactive";
-import type { Deps } from "../src/core/types";
+import { recordMischief } from "../src/core/expression";
+import type { Deps, Extras, Outbound } from "../src/core/types";
 import { getUser, updateUser, userForChannel } from "../src/core/users";
 import { migrate, transactionalDb, type Db } from "../src/db";
 import { providerOrder } from "../src/config";
@@ -58,6 +59,12 @@ const llm = openRouter(key, {
 });
 const deps: Deps = {
   db, clock: () => new Date(Date.now() + offsetMs), random: Math.random, llmFor: () => llm,
+  // No Telegram here: a stand-in sticker set, and voice notes shown as text.
+  expression: {
+    stickers: () => (process.env.EMI_LIVE_STICKERS ?? "😹 😾 😿 🙀 😻 😼 😽 🐱").split(/\s+/).filter(Boolean),
+    speak: async () => new Uint8Array(),
+    voiceTags: true,
+  },
   models: {
     writer: writerModel,
     utility: process.env.EMI_UTILITY_MODEL ?? "z-ai/glm-5.3-flash",
@@ -70,7 +77,19 @@ await updateUser(db, created.id, { timezone: tz, timezoneKnown: true, dailyCapUs
 const userId = created.id;
 
 const say = (who: string, text: string) => console.log(`\n${who}: ${text.replace(/\n/g, `\n${" ".repeat(who.length + 2)}`)}`);
-const outbound = { send: async (_id: string, bubbles: string[]) => { for (const bubble of bubbles) say("emi (wrote first)", bubble); } };
+const showExtras = (who: string, extras?: Extras) => {
+  if (extras?.sticker) say(who, `(sticker ${extras.sticker})`);
+  if (extras?.voice) say(who, `(voice note) ${extras.voice}`);
+  if (extras?.pin) say(who, `(pins) ${extras.pin}`);
+};
+const outbound: Outbound = {
+  send: async (_id, bubbles, extras) => {
+    for (const bubble of bubbles) say("emi (wrote first)", bubble);
+    showExtras("emi (wrote first)", extras);
+    return { sticker: extras?.sticker, voice: extras?.voice };
+  },
+  undo: async (_id, act) => say("emi", `(unpins "${String(act.detail.text)}")`),
+};
 const UNITS: Record<string, number> = { m: 60_000, h: 3_600_000, d: 86_400_000 };
 
 async function handle(line: string): Promise<void> {
@@ -102,6 +121,8 @@ async function handle(line: string): Promise<void> {
     const result = await handleTurn(deps, userId, line);
     if (result.reaction) say("emi", `(reacts ${result.reaction})`);
     for (const bubble of result.bubbles) say("emi", bubble);
+    showExtras("emi", result.extras);
+    if (result.extras?.pin) await recordMischief(db, userId, { pinned: { text: result.extras.pin, detail: {} } }, deps.clock());
     if (!result.problem) {
       const summary = await runExtraction(deps, userId, { memoryIds: result.recalledIds });
       if (summary && Object.values(summary).some(Boolean)) console.log(`  (kept: ${JSON.stringify(summary)})`);

@@ -2,6 +2,7 @@ import { z } from "zod";
 import { decryptKey, parseMasterKey } from "./core/keys";
 import type { Models, User } from "./core/types";
 import { openRouter } from "./llm/openrouter";
+import type { VoiceConfig } from "./core/voice";
 import type { Llm } from "./llm/provider";
 
 const Env = z.object({
@@ -19,6 +20,12 @@ const Env = z.object({
   // Provider to ask first for each model (OpenRouter endpoint tags, comma-separated).
   EMI_WRITER_PROVIDER: z.string().default("baidu/fp8,deepinfra/fp8"),
   EMI_UTILITY_PROVIDER: z.string().optional(),
+  // Stickers: Telegram sticker set names, comma-separated (the part after t.me/addstickers/).
+  EMI_STICKER_PACKS: z.string().default("catsunicmass"),
+  // Voice notes: ElevenLabs. Both must be set for her to send any.
+  ELEVENLABS_API_KEY: z.string().optional(),
+  EMI_VOICE_ID: z.string().optional(),
+  EMI_TTS_MODEL: z.string().default("eleven_v4"),
 });
 
 export interface Config {
@@ -29,6 +36,10 @@ export interface Config {
   allowedTelegramIds: Set<string> | null;
   models: Models;
   webEnabled?: boolean;
+  /** Telegram sticker sets she may send from. */
+  stickerPacks?: string[];
+  /** Her voice, when configured. */
+  voice?: VoiceConfig;
   /** Providers to ask first, per model id. See OpenRouterConfig. */
   providers?: Record<string, string[]>;
   /** Type chat replies at a human pace. Off unless set, so tests never wait. */
@@ -51,6 +62,10 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     masterKey: parseMasterKey(e.EMI_MASTER_KEY),
     sharedKey: e.EMI_SHARED_OPENROUTER_KEY?.trim() || null,
     allowedTelegramIds: ids.length ? new Set(ids) : null,
+    stickerPacks: e.EMI_STICKER_PACKS.split(",").map((name) => name.trim()).filter(Boolean),
+    voice: e.ELEVENLABS_API_KEY?.trim() && e.EMI_VOICE_ID?.trim()
+      ? { apiKey: e.ELEVENLABS_API_KEY.trim(), voiceId: e.EMI_VOICE_ID.trim(), model: e.EMI_TTS_MODEL }
+      : undefined,
     providers: providerOrder([[e.EMI_WRITER_MODEL, e.EMI_WRITER_PROVIDER], [e.EMI_UTILITY_MODEL, e.EMI_UTILITY_PROVIDER]]),
     models: { writer: e.EMI_WRITER_MODEL, vision: e.EMI_VISION_MODEL?.trim() || e.EMI_WRITER_MODEL, utility: e.EMI_UTILITY_MODEL, embedding: e.EMI_EMBEDDING_MODEL },
   };

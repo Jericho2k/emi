@@ -5,15 +5,16 @@ import { DAILY_PING_BUDGET, SILENCE_HOURS } from "./agenda/policy";
 import { claimDuePings, expireStale, hasOpenInitiative, setPing, setStatus, upsertAgendaItem } from "./agenda/store";
 import { bondLines, bondSnapshot, currentIrritation, IRRITATION_HOLDS_INITIATIVE, type BondSnapshot } from "./bond";
 import { ensureInnerDay, onHerMind, sweepInnerDays } from "./inner";
+import { allowance, allowanceLines, permitted, storedExtras, sweepMakeups } from "./expression";
 import { describeGap, describeMoment, inQuietHours, localParts, localToUtc, nextAwake } from "./clock";
 import { runExtraction } from "./extraction";
 import { activeMemories } from "./memory/store";
 import { sweepConsolidation } from "./memory/timeline";
 import { messageContent } from "./message";
-import { webContext } from "./web";
+import { attachSources, webContext } from "./web";
 import { PERSONA } from "./persona";
-import { joinBubbles, parseReply, renderHistory } from "./prompt";
-import type { AgendaItem, Deps, Outbound, User } from "./types";
+import { parseReply, renderHistory, storedReply } from "./prompt";
+import type { AgendaItem, Deps, Extras, Outbound, User } from "./types";
 import { addMessage, getUser, proactiveSentToday, recentMessages, recordUsage, underDailyCap, updateUser } from "./users";
 
 const HOUR = 3_600_000;
@@ -54,9 +55,14 @@ export async function pingVerdict(deps: Deps, user: User, item: AgendaItem, now:
  * is now. Only a goal was stored, never wording, so nothing composed against
  * an older conversation can reach the person.
  */
-async function compose(deps: Deps, user: User, item: AgendaItem, now: Date): Promise<string[] | null> {
+interface Composed { bubbles: string[]; extras: Extras }
+
+async function compose(deps: Deps, user: User, item: AgendaItem, now: Date): Promise<Composed | null> {
+  const fallback = item.kind === "reminder" ? { bubbles: [`Reminder: ${item.about}`], extras: {} } : null;
   const llm = deps.llmFor(user);
-  if (!llm) return item.kind === "reminder" ? [`Reminder: ${item.about}`] : null;
+  if (!llm) return fallback;
+  // Something she found for them is worth real links; a check-in is not worth a search.
+  const web = item.spontaneous && !!llm.capabilities?.web;
 
   const notes = item.kind === "reminder"
     ? `They asked you to remind them about this, and now is the time: "${item.about}". Tell them, briefly, in your own voice.`
@@ -65,7 +71,8 @@ async function compose(deps: Deps, user: User, item: AgendaItem, now: Date): Pro
       `What it's about: "${item.about}".`,
       item.reason ? `Why it made you think of them: ${item.reason}.` : "",
       "Read the conversation above first. If the moment is wrong (they're busy, stressed, or it would land oddly now), reply with exactly HOLD.",
-      "Otherwise text it the way you'd send something to the person you're with: short, light, specific, a little sweet. Not a bare \"thinking of you\" or \"just checking in\", and no question they have to answer.",
+      web ? "If it fits, look online for something real and recent that connects (an article, a video, a bit of news) and send it with its link, the way people send each other things they saw. Only a link you actually found; if nothing good turns up, send it without one." : "",
+      "Otherwise text it the way you'd send something to the person you're with: short, light, specific, a little sweet. Not a bare \"thinking of you\" or \"just checking in\", and no question they have to answer. A sticker on top can say the rest.",
     ].filter(Boolean).join("\n") : [
       "Nobody wrote to you. You are writing first, because you thought of them.",
       `What it's about: "${item.about}".`,
@@ -76,7 +83,9 @@ async function compose(deps: Deps, user: User, item: AgendaItem, now: Date): Pro
       "Read the conversation above first. If they already told you how this went, if the conversation has moved somewhere this would be intrusive, or if it simply no longer makes sense, reply with exactly HOLD.",
       "Otherwise write what you'd text: short, specific to them, no greeting formula, no \"just checking in\", nothing about remembering, notes or schedules.",
     ].filter(Boolean).join("\n");
-  const messages: ChatMessage[] = [{ role: "system", content: `${PERSONA}\n\n${webContext(false)}` }, ...renderHistory(await recentMessages(deps.db, user.id, 20), user.timezone)];
+  const messages: ChatMessage[] = [{ role: "system", content: `${PERSONA}\n\n${webContext(web)}` }, ...renderHistory(await recentMessages(deps.db, user.id, 20), user.timezone)];
+  // Writing first is never the moment for a pinned sulk.
+  const allowed = item.kind === "reminder" ? { stickers: [], voice: false, pin: false } : { ...(await allowance(deps, user, now)), pin: false };
   const bond = await bondSnapshot(deps.db, user, now);
   const inner = onHerMind(user, now);
   const final = [
@@ -84,6 +93,7 @@ async function compose(deps: Deps, user: User, item: AgendaItem, now: Date): Pro
     `Now, where they are: ${describeMoment(now, user.timezone)}.`,
     ...bondLines(bond, user, now, null),
     ...(inner ? [`On your mind ${inner.today ? "today" : "lately"}: ${inner.thought}`] : []),
+    ...allowanceLines(allowed, deps.expression?.voiceTags),
     notes, "</notes>",
   ].join("\n");
   const last = messages[messages.length - 1];
@@ -91,17 +101,19 @@ async function compose(deps: Deps, user: User, item: AgendaItem, now: Date): Pro
   else messages.push({ role: "user", content: final });
 
   try {
-    const reply = await llm.chat(messages, { model: deps.models.writer, temperature: 0.9, maxTokens: 300 });
+    const reply = await llm.chat(messages, { model: deps.models.writer, temperature: 0.9, maxTokens: web ? 1200 : 300, web });
     await recordUsage(deps.db, user.id, "proactive", reply.usage, now);
-    if (/^\W*HOLD\W*$/i.test(reply.text.trim())) return item.kind === "reminder" ? [`Reminder: ${item.about}`] : null;
-    const { bubbles } = parseReply(reply.text, "social");
-    return bubbles.length ? bubbles : null;
+    if (/^\W*HOLD\W*$/i.test(reply.text.trim())) return fallback;
+    const parsed = parseReply(reply.text, "social");
+    const { extras, asText } = permitted(parsed.extras, allowed);
+    const bubbles = attachSources([...parsed.bubbles, ...asText], reply.citations);
+    return bubbles.length || extras.sticker || extras.voice ? { bubbles, extras } : fallback;
   } catch (error) {
     if (error instanceof ConversationReset) throw error;
     if (error instanceof LlmResponseError) await recordUsage(deps.db, user.id, "proactive_failed", error.usage, now);
     console.warn("[proactive] compose failed", error instanceof Error ? error.message : error);
     // A reminder is a promise, so it goes out even when the model does not.
-    return item.kind === "reminder" ? [`Reminder: ${item.about}`] : null;
+    return fallback;
   }
 }
 
@@ -121,16 +133,16 @@ export async function runDuePings(deps: Deps, outbound: Outbound): Promise<numbe
           await setPing(deps.db, item.id, verdict.retryAt, now);
           return false;
         }
-        const bubbles = await compose(deps, user, item, now);
-        if (!bubbles) {
+        const composed = await compose(deps, user, item, now);
+        if (!composed) {
           await setStatus(deps.db, item.id, "cancelled", "held: no longer fit the conversation", now);
           return false;
         }
         // A send already begun completes before wipe confirms. A composition
         // still in flight when wipe wins never sends or saves its old content.
         await conversationEffect(deps.db, async () => {
-          await outbound.send(user.id, bubbles);
-          await addMessage(deps.db, { userId: user.id, role: "emi", content: joinBubbles(bubbles), kind: "proactive", agendaItemId: item.id, at: now });
+          const sent = await outbound.send(user.id, composed.bubbles, composed.extras);
+          await addMessage(deps.db, { userId: user.id, role: "emi", content: storedReply(composed.bubbles, undefined, storedExtras(sent)), kind: "proactive", agendaItemId: item.id, at: now });
           await setStatus(deps.db, item.id, item.kind === "reminder" ? "done" : "pinged", "sent", now);
         });
         return true;
@@ -164,7 +176,7 @@ Rules:
 - If they have seemed busy, stressed or short lately, null.
 - "just_because" is false for all of the above.
 
-Sometimes the input says Emi and they are together (she's their girlfriend), so she may write just because. Then she may also reach out with no event behind it, the way partners send each other things: a thought on her mind today ("t1") that connects to something they love, a callback to a joke or pet name between them, a fact they would enjoy given what they like. Then "just_because" is true, "importance" is 2, and "based_on" cites what it connects (at least one of their memories). It must be something that would make THEM smile, specific to them; never "thinking of you", never a question they owe an answer to. Even then, null is still the most common answer.`;
+Sometimes the input says Emi and they are together (she's their girlfriend), so she may write just because. Then she may also reach out with no event behind it, the way partners send each other things: a thought on her mind today ("t1") that connects to something they love, a callback to a joke or pet name between them, a fact they would enjoy given what they like, or a follow-up on something the two of them talked about lately (something she could look up for them). Then "just_because" is true, "importance" is 2, and "based_on" cites what it connects (at least one of their memories). It must be something that would make THEM smile, specific to them; never "thinking of you", never a question they owe an answer to. Even then, null is still the most common answer.`;
 
 const ReachOut = z.object({
   about: z.string().trim().min(3).max(160),
@@ -311,4 +323,5 @@ export async function tick(deps: Deps, outbound: Outbound): Promise<void> {
   await sweepExtraction(deps);
   await sweepConsolidation(deps);
   await sweepInnerDays(deps);
+  await sweepMakeups(deps, outbound);
 }

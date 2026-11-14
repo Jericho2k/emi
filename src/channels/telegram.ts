@@ -12,7 +12,8 @@ import { activeMemories, deleteMemory, findByShortId, insertMemory } from "../co
 import { afterTurn, handleTurn } from "../core/pipeline";
 import { classifyTurn } from "../core/prompt";
 import { bubbleWaits, isPaced, typingMs } from "../core/rhythm";
-import { INITIATIVE_LEVELS, type Deps, type Initiative, type IncomingMessage, type Outbound, type User } from "../core/types";
+import { normalizeEmoji, recordMischief, undoAll } from "../core/expression";
+import { INITIATIVE_LEVELS, type Deps, type Extras, type Initiative, type IncomingMessage, type Outbound, type SentExtras, type User } from "../core/types";
 import { addMessage, chatIdFor, getUser, spentToday, updateUser, userForChannel } from "../core/users";
 import { chunkText, toTelegramHtml } from "./telegram-format";
 import { telegramImages, telegramImageFile } from "./telegram-images";
@@ -29,6 +30,7 @@ const HELP = [
   "/forget <id> — make me forget one thing",
   "/agenda — what I'm planning to bring up",
   "/initiative off | low | medium | high — how often I write first",
+  "/mischief on | off — whether I may pin a sulk in our chat when you've annoyed me",
   "/timezone <Area/City> — where you are, e.g. Europe/Berlin",
   "/quiet <from> <to> — hours I stay silent, e.g. /quiet 23 8",
   "/usage — what today has cost, and /cap <usd> to change the limit on what I spend unasked",
@@ -36,8 +38,19 @@ const HELP = [
   "/wipe — erase our whole conversation and everything I remember",
 ].join("\n");
 
-export function createTelegram(deps: Deps, config: Config): { bot: Bot; outbound: Outbound } {
+export interface Telegram {
+  bot: Bot;
+  outbound: Outbound;
+  /** Loads the configured sticker sets. Call once before starting the bot. */
+  loadStickers(): Promise<number>;
+  /** Emoji of the stickers she can send. */
+  stickerEmoji(): string[];
+}
+
+export function createTelegram(deps: Deps, config: Config): Telegram {
   const bot = new Bot(config.telegramToken);
+  /** Sticker file ids by the emoji Telegram attached to them. */
+  const stickers = new Map<string, string[]>();
 
   const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
   const typing = (chatId: string | number) => void bot.api.sendChatAction(chatId, "typing").catch(() => undefined);
@@ -68,15 +81,80 @@ export function createTelegram(deps: Deps, config: Config): { bot: Bot; outbound
     }
   }
 
+  /**
+   * Sends what goes with the words. Anything that fails falls back to what
+   * still gets the point across: a voice note becomes text, a lost sticker
+   * is simply not sent. Returns what really went out.
+   */
+  async function sendExtras(chatId: string | number, extras: Extras = {}): Promise<SentExtras> {
+    const sent: SentExtras = {};
+    if (extras.sticker) {
+      const ids = stickers.get(normalizeEmoji(extras.sticker)) ?? [];
+      const id = ids[Math.floor(deps.random() * ids.length)];
+      if (id) {
+        if (config.pacing) await sleep(500 + deps.random() * 700);
+        await bot.api.sendSticker(chatId, id).then(() => { sent.sticker = extras.sticker; }, (error) => console.warn("[sticker]", error instanceof Error ? error.message : error));
+      }
+    }
+    if (extras.voice) {
+      const speak = deps.expression?.speak;
+      try {
+        if (!speak) throw new Error("no voice configured");
+        void bot.api.sendChatAction(chatId, "record_voice").catch(() => undefined);
+        const audio = await speak(extras.voice);
+        await bot.api.sendVoice(chatId, new InputFile(audio, "emi.mp3"));
+        sent.voice = extras.voice;
+      } catch (error) {
+        console.warn("[voice]", error instanceof Error ? error.message : error);
+        // Said anyway, as text, without the stage directions.
+        const text = extras.voice.replace(/\[[a-z ]{2,20}\]\s*/gi, "").trim();
+        if (text) await sendBubbles(chatId, [text]);
+      }
+    }
+    if (extras.pin) {
+      const message = await bot.api.sendMessage(chatId, extras.pin);
+      await bot.api.pinChatMessage(chatId, message.message_id, { disable_notification: true })
+        .then(() => { sent.pinned = { text: extras.pin!, detail: { chatId: String(chatId), messageId: message.message_id } }; },
+          (error) => console.warn("[pin]", error instanceof Error ? error.message : error));
+    }
+    return sent;
+  }
+
   const outbound: Outbound = {
-    async send(userId, bubbles) {
+    async send(userId, bubbles, extras) {
       const chatId = await chatIdFor(deps.db, userId, CHANNEL);
       if (!chatId) throw new Error(`no telegram chat for user ${userId}`);
       // Writing first is chatting: the first message simply arrives (nobody was
       // watching her type it), and any further ones are typed, never dumped.
       await sendBubbles(chatId, bubbles, config.pacing ? bubbles.map((bubble, index) => (index ? typingMs(bubble, deps.random) : 0)) : undefined);
+      return sendExtras(chatId, extras);
+    },
+    async undo(_userId, act) {
+      const chatId = String(act.detail.chatId ?? "");
+      const messageId = Number(act.detail.messageId);
+      if (!chatId || !Number.isFinite(messageId)) return;
+      // She takes it down: unpinned, and the status itself gone.
+      await bot.api.unpinChatMessage(chatId, messageId).catch(() => undefined);
+      await bot.api.deleteMessage(chatId, messageId).catch(() => undefined);
     },
   };
+
+  async function loadStickers(): Promise<number> {
+    stickers.clear();
+    for (const name of config.stickerPacks ?? []) {
+      try {
+        const set = await bot.api.getStickerSet(name);
+        for (const sticker of set.stickers) {
+          if (!sticker.emoji) continue;
+          const emoji = normalizeEmoji(sticker.emoji);
+          stickers.set(emoji, [...(stickers.get(emoji) ?? []), sticker.file_id]);
+        }
+      } catch (error) {
+        console.warn(`[stickers] could not load ${name}:`, error instanceof Error ? error.message : error);
+      }
+    }
+    return [...stickers.values()].reduce((sum, ids) => sum + ids.length, 0);
+  }
 
   async function userOf(ctx: Context): Promise<User | null> {
     if (ctx.chat?.type !== "private" || !ctx.from) return null;
@@ -197,6 +275,13 @@ export function createTelegram(deps: Deps, config: Config): { bot: Bot; outbound
     return reply(arg === "off" ? "ok. i won't write first, except reminders you ask for." : `ok, ${arg}.`);
   });
 
+  command("mischief", async (_ctx, user, arg, reply) => {
+    if (arg !== "on" && arg !== "off") return reply(`it's ${user.mischief ? "on" : "off"}. /mischief on lets me pin a sulk in our chat when you've annoyed me (i take it down myself once i've cooled off). /mischief off stops that.`);
+    await updateUser(deps.db, user.id, { mischief: arg === "on" });
+    if (arg === "off") await undoAll(deps, user.id, outbound);
+    return reply(arg === "on" ? "ok. behave." : "ok. no more pinned sulks, i'll just tell you.");
+  });
+
   command("timezone", async (_ctx, user, arg, reply) => {
     if (!isValidTimeZone(arg)) return reply(`i have ${user.timezoneKnown ? user.timezone : "nothing yet"}. send it like /timezone Europe/Berlin, or just tell me your city.`);
     await updateUser(deps.db, user.id, { timezone: arg, timezoneKnown: true });
@@ -245,6 +330,8 @@ export function createTelegram(deps: Deps, config: Config): { bot: Bot; outbound
     if (arg.toLowerCase() !== "yes") {
       return reply("this erases our whole conversation and everything i remember about you. it can't be undone. /export first if you want a copy, then send /wipe yes.");
     }
+    // Nothing she pinned may outlive the record of it.
+    await undoAll(deps, user.id, outbound);
     await wipeAccount(deps.db, user.id);
     return reply("done. everything is erased. your settings and key are still here, so you can just start talking again.");
   });
@@ -292,6 +379,8 @@ export function createTelegram(deps: Deps, config: Config): { bot: Bot; outbound
       await conversationEffect(deps.db, async () => {
         if (result.reaction && last) await react(chatId, last.message_id, result.reaction, result.bubbles.length > 0);
         await sendBubbles(chatId, result.bubbles, paced ? bubbleWaits(result.bubbles, Date.now() - started, deps.random) : undefined);
+        const sent = await sendExtras(chatId, result.extras);
+        await recordMischief(deps.db, userId, sent, deps.clock());
       });
       if (!result.problem) {
         void afterTurn(deps, userId, result).catch((error) => { if (!(error instanceof ConversationReset)) console.warn("[background]", error); });
@@ -335,5 +424,5 @@ export function createTelegram(deps: Deps, config: Config): { bot: Bot; outbound
   });
 
   bot.catch((error) => console.error("[telegram]", error.message));
-  return { bot, outbound };
+  return { bot, outbound, loadStickers, stickerEmoji: () => [...stickers.keys()] };
 }
