@@ -129,3 +129,26 @@ describe("writing first", () => {
     expect(await lastStored(w, person.id)).toBe("anglerfish dating is worse than yours\n[sent sticker 😹]");
   });
 });
+
+describe("her voice", () => {
+  it("knows which ElevenLabs models understand audio tags", async () => {
+    const { supportsAudioTags } = await import("../src/core/voice");
+    expect(["eleven_v4", "eleven_v4_turbo", "eleven_v3"].map(supportsAudioTags)).toEqual([true, true, true]);
+    expect(supportsAudioTags("eleven_multilingual_v2")).toBe(false);
+  });
+});
+
+describe("moments", () => {
+  it("spots the messages people answer with a sticker or a voice note, in English and Russian", async () => {
+    const { momentHint } = await import("../src/core/expression");
+    const all = { stickers: ["😹"], voice: true, pin: false };
+    expect(momentHint("ok im going to bed, goodnight emi", all)).toContain("voice note");
+    expect(momentHint("ладно, спокойной ночи", { ...all, voice: false })).toContain("sticker");
+    expect(momentHint("lmaooo my cat", all)).toContain("laughing");
+    expect(momentHint("ахахах ну ты даёшь", all)).toContain("laughing");
+    expect(momentHint("I GOT THE JOB!!!", all)).toContain("good news");
+    expect(momentHint("can you fix this regex", all)).toBeNull();
+    expect(momentHint("haha", { stickers: [], voice: false, pin: false })).toBeNull();
+    expect(momentHint("glossary", all)).toBeNull(); // no "lol" inside words
+  });
+});

@@ -25,7 +25,7 @@ const Env = z.object({
   // Voice notes: ElevenLabs. Both must be set for her to send any.
   ELEVENLABS_API_KEY: z.string().optional(),
   EMI_VOICE_ID: z.string().optional(),
-  EMI_TTS_MODEL: z.string().default("eleven_v3"),
+  EMI_TTS_MODEL: z.string().default("eleven_v4"),
 });
 
 export interface Config {

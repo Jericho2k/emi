@@ -93,7 +93,7 @@ export async function handleTurn(deps: Deps, userId: string, input: string | Inc
   const messages = buildTurnMessages({
     user, now, recall: recalled, weave, turnKind, previousUserAt, timeline: await timelineFor(db, user),
     bond: await bondSnapshot(db, user, now), onHerMind: onHerMind(user, now),
-    allowance: allowanceLines(allowed, deps.expression?.voiceTags),
+    allowance: allowanceLines(allowed, deps.expression?.voiceTags, text),
     images, historyImages: await imageHistory(db, userId, history, images, now),
     hasPriorConversation: history.length > 0 || incoming.some((message) => !!message.replyTo),
   }, history, content);

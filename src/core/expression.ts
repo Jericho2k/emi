@@ -82,12 +82,36 @@ export async function allowance(deps: Deps, user: User, now: Date): Promise<Allo
   return { stickers, voice, pin };
 }
 
+/** Moments people answer with a sticker or a voice note, spotted in their message. */
+const MOMENTS: Array<{ test: RegExp; hint: (allowed: Allowance) => string | null }> = [
+  {
+    test: /(?<![\p{L}])(good ?night|night night|gn|nighty|спокойной|доброй ночи|сладких снов|споки|ночки)(?![\p{L}])|going to bed|иду спать|пошла спать|пошёл спать|пошел спать/iu,
+    hint: (a) => (a.voice ? "It's a goodnight: a short sleepy voice note would be sweet here." : a.stickers.length ? "It's a goodnight: a sticker would be sweet here." : null),
+  },
+  {
+    test: /(?<![\p{L}])(lo+l|lmf?a+o+|ha(ha)+h?|ah(ah)+|ха(ха)+х?|ах(ах)+|ору|ржу)(?![\p{L}])|[😂🤣💀]/iu,
+    hint: (a) => (a.stickers.length ? "They're laughing: a sticker can laugh back, on its own or after your words." : null),
+  },
+  {
+    test: /!!!|(?<![\p{L}])(got the job|i did it|we did it|passed|получилось|ура|сдал|сдала|взяли)(?![\p{L}])/iu,
+    hint: (a) => (a.stickers.length ? "It's good news: celebrate it, and a sticker fits." : null),
+  },
+];
+
+/** One hint for this moment, if their message is the kind people answer with more than words. */
+export function momentHint(text: string, allowed: Allowance): string | null {
+  for (const moment of MOMENTS) if (moment.test.test(text)) return moment.hint(allowed);
+  return null;
+}
+
 /** The lines in her private notes saying what she can send besides text. */
-export function allowanceLines(allowed: Allowance, voiceTags = false): string[] {
+export function allowanceLines(allowed: Allowance, voiceTags = false, theirText = ""): string[] {
   const lines: string[] = [];
   if (allowed.stickers.length) lines.push(`Stickers you can send (by emoji): ${allowed.stickers.join(" ")}`);
-  if (allowed.voice) lines.push(`You can send a voice note.${voiceTags ? " Audio tags like [sighs], [laughs], [whispers] work in it." : ""}`);
+  if (allowed.voice) lines.push(`You can send a voice note.${voiceTags ? " Audio tags like [sighs], [laughs], [whispers], [yawning], [groggy] work in it." : ""}`);
   if (allowed.pin) lines.push("You're annoyed enough to pin a sulky status in the chat, if the moment really calls for it.");
+  const hint = theirText ? momentHint(theirText, allowed) : null;
+  if (hint) lines.push(hint);
   return lines;
 }
 

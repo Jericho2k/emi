@@ -7,12 +7,12 @@
 export interface VoiceConfig {
   apiKey: string;
   voiceId: string;
-  /** eleven_v3 understands audio tags like [sighs]; older models read them aloud. */
+  /** eleven_v3 and eleven_v4 understand audio tags like [sighs]; older models read them aloud. */
   model: string;
 }
 
 export function supportsAudioTags(model: string): boolean {
-  return model.startsWith("eleven_v3");
+  return /^eleven_v[34]/.test(model);
 }
 
 export function elevenLabs(config: VoiceConfig): (text: string) => Promise<Uint8Array> {
