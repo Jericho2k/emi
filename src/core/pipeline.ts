@@ -1,16 +1,24 @@
 import { LlmResponseError } from "../llm/provider";
 import { ProviderError } from "../llm/openrouter";
 import { absorbOnUserMessage, openForWeave, setStatus } from "./agenda/store";
+import { bondSnapshot } from "./bond";
+import { runExtraction } from "./extraction";
+import { ensureInnerDay, onHerMind } from "./inner";
 import { recall } from "./memory/recall";
-import { timelineFor } from "./memory/timeline";
-import { agendaLabel, buildTurnMessages, classifyTurn, historyWindow, joinBubbles, parseReply, type TurnKind } from "./prompt";
+import { runConsolidation, timelineFor } from "./memory/timeline";
+import { agendaLabel, buildTurnMessages, classifyTurn, historyWindow, parseReply, storedReply, type TurnKind } from "./prompt";
+import { imageHistory, validateImages, VISION_CONTEXT } from "./images";
+import { prepareImages } from "./image-prep";
 import { messageContent } from "./message";
 import type { Deps, IncomingMessage } from "./types";
 import { attachSources, webContext } from "./web";
 import { addMessage, getUser, messageCount, recentMessages, recordUsage } from "./users";
 
 export interface TurnResult {
+  /** What to send. Empty when she only reacted. */
   bubbles: string[];
+  /** An emoji reaction to put on their last message. */
+  reaction?: string;
   turnKind: TurnKind;
   /** Set when no reply could be written; `bubbles` then holds a plain notice. */
   problem?: "no_key" | "key_rejected" | "model_unavailable";
@@ -34,21 +42,28 @@ const SETTINGS: Record<TurnKind, { temperature: number; maxTokens: number }> = {
  * execution. Memory extraction still happens after the reply.
  */
 export async function handleTurn(deps: Deps, userId: string, input: string | IncomingMessage[]): Promise<TurnResult> {
-  const incoming = typeof input === "string" ? [{ text: input }] : input;
-  if (!incoming.length) throw new Error("a turn needs at least one message");
+  const raw = typeof input === "string" ? [{ text: input }] : input;
+  if (!raw.length) throw new Error("a turn needs at least one message");
+  validateImages(raw.flatMap((message) => message.images ?? []));
+  // Shrunk once here, so storage and every later replay use the smaller copy.
+  const incoming: IncomingMessage[] = [];
+  for (const message of raw) incoming.push(message.images?.length ? { ...message, images: await prepareImages(message.images) } : message);
+  const images = incoming.flatMap((message) => message.images ?? []);
+  validateImages(images);
   const text = incoming.map((message) => message.text).join("\n");
   const content = incoming.map(messageContent).join("\n\n");
   const { db } = deps;
   const user = await getUser(db, userId);
   if (!user) throw new Error(`unknown user ${userId}`);
   const now = deps.clock();
-  const turnKind = classifyTurn(text);
+  const classified = classifyTurn(text);
+  const turnKind = images.length && classified === "social" ? "mixed" : classified;
 
   // Read the history before storing, so the new message is not in it twice.
   const history = await recentMessages(db, userId, historyWindow(await messageCount(db, userId)));
   const previousUserAt = user.lastUserMessageAt;
   for (const message of incoming) {
-    await addMessage(db, { userId, role: "user", content: message.text, replyTo: message.replyTo, at: now });
+    await addMessage(db, { userId, role: "user", content: message.text, replyTo: message.replyTo, images: message.images, at: now });
   }
 
   // They wrote first: anything she planned to send becomes something she can
@@ -61,9 +76,9 @@ export async function handleTurn(deps: Deps, userId: string, input: string | Inc
 
   let queryVector: number[] | null = null;
   try {
-    const embedded = await llm.embed([text.slice(0, 2000)], deps.models.embedding);
-    queryVector = embedded.vectors[0] ?? null;
-    await recordUsage(db, userId, "embed_query", embedded.usage, now);
+    const embedded = text.trim() ? await llm.embed([text.slice(0, 2000)], deps.models.embedding) : null;
+    queryVector = embedded?.vectors[0] ?? null;
+    if (embedded) await recordUsage(db, userId, "embed_query", embedded.usage, now);
   } catch {
     // Word matching alone still recalls; a reply never waits on embeddings.
   }
@@ -71,17 +86,23 @@ export async function handleTurn(deps: Deps, userId: string, input: string | Inc
 
   const messages = buildTurnMessages({
     user, now, recall: recalled, weave, turnKind, previousUserAt, timeline: await timelineFor(db, user),
+    bond: await bondSnapshot(db, user, now), onHerMind: onHerMind(user, now),
+    images, historyImages: await imageHistory(db, userId, history, images, now),
     hasPriorConversation: history.length > 0 || incoming.some((message) => !!message.replyTo),
   }, history, content);
-  messages[0]!.content += `\n\n${webContext(!!llm.capabilities?.web)}`;
+  messages[0]!.content += `\n\n${webContext(!!llm.capabilities?.web)}\n\n${VISION_CONTEXT}`;
+  const hasImages = messages.some((message) => message.images?.length);
+  const model = hasImages ? deps.models.vision ?? deps.models.writer : deps.models.writer;
   let reply;
   try {
-    reply = await llm.chat(messages, { model: deps.models.writer, ...SETTINGS[turnKind], web: !!llm.capabilities?.web });
+    reply = await llm.chat(messages, { model, ...SETTINGS[turnKind], web: !!llm.capabilities?.web });
   } catch (error) {
     if (error instanceof LlmResponseError) {
       await recordUsage(db, userId, "reply_failed", error.usage, now);
       console.warn("[reply]", error.message);
-      const notice = error.kind === "web_unavailable"
+      const notice = error.kind === "image_unavailable"
+        ? "the selected model couldn't read that image. try a smaller PNG or JPEG, or check that the model supports images."
+        : error.kind === "web_unavailable"
         ? "my web request was rejected. the OpenRouter model or tool permissions need checking; I couldn't verify that online."
         : error.kind === "request_failed"
           ? "the request failed while I was trying again. try that in a moment."
@@ -97,11 +118,25 @@ export async function handleTurn(deps: Deps, userId: string, input: string | Inc
   await recordUsage(db, userId, "reply", reply.usage, now);
 
   const parsed = parseReply(reply.text, turnKind);
-  const bubbles = attachSources(parsed.bubbles.length ? parsed.bubbles : [reply.text.trim()], reply.citations);
+  const reactionOnly = !parsed.bubbles.length && !!parsed.reaction;
+  const bubbles = attachSources(parsed.bubbles.length || reactionOnly ? parsed.bubbles : [reply.text.trim()], reply.citations);
   for (const [index, item] of weave.entries()) {
     if (parsed.used.includes(agendaLabel(index))) await setStatus(db, item.id, "woven", "brought up in conversation", now);
   }
-  await addMessage(db, { userId, role: "emi", content: joinBubbles(bubbles), at: deps.clock() });
+  await addMessage(db, { userId, role: "emi", content: storedReply(bubbles, parsed.reaction), at: deps.clock() });
 
-  return { bubbles, turnKind, recalledIds: [...recalled.standing, ...recalled.relevant].map((memory) => memory.id) };
+  return {
+    bubbles, turnKind, ...(parsed.reaction ? { reaction: parsed.reaction } : {}),
+    recalledIds: [...recalled.standing, ...recalled.relevant, ...recalled.us, ...recalled.self].map((memory) => memory.id),
+  };
+}
+
+/**
+ * Everything that follows a reply, off the reply path: what to remember, the
+ * long timeline, and what is on her mind today. Each step fails on its own.
+ */
+export async function afterTurn(deps: Deps, userId: string, result: Pick<TurnResult, "recalledIds">): Promise<void> {
+  await runExtraction(deps, userId, { memoryIds: result.recalledIds }).catch((error) => console.warn("[extraction]", error));
+  await runConsolidation(deps, userId).catch((error) => console.warn("[timeline]", error));
+  await ensureInnerDay(deps, userId).catch((error) => console.warn("[inner]", error));
 }

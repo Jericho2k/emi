@@ -11,7 +11,7 @@ export function agendaFromRow(row: Row): AgendaItem {
     id: row.id, userId: row.user_id, kind: row.kind, about: row.about, reason: row.reason,
     importance: row.importance, eventAt: toDate(row.event_at), windowStart: toDate(row.window_start)!,
     windowEnd: toDate(row.window_end)!, pingAt: toDate(row.ping_at), closesWhen: row.closes_when,
-    status: row.status, attempts: row.attempts, pingedAt: toDate(row.pinged_at), createdAt: toDate(row.created_at)!,
+    status: row.status, attempts: row.attempts, pingedAt: toDate(row.pinged_at), spontaneous: !!row.spontaneous, createdAt: toDate(row.created_at)!,
   };
 }
 
@@ -24,21 +24,22 @@ export interface NewAgendaItem extends Windows {
   eventAt?: Date | null;
   closesWhen?: string;
   sourceMessageId?: number | null;
+  spontaneous?: boolean;
   at: Date;
 }
 
 /** One pending item per subject: mentioning the interview twice refreshes it. */
 export async function upsertAgendaItem(db: Db, input: NewAgendaItem): Promise<AgendaItem> {
   const { rows } = await db.query<Row>(
-    `insert into agenda_items (user_id, kind, about, reason, importance, event_at, window_start, window_end, ping_at, closes_when, dedupe_key, source_message_id, created_at, updated_at)
-     values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $13)
+    `insert into agenda_items (user_id, kind, about, reason, importance, event_at, window_start, window_end, ping_at, closes_when, dedupe_key, source_message_id, created_at, updated_at, spontaneous)
+     values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $13, $14)
      on conflict (user_id, dedupe_key) where status = 'pending' do update set
        about = excluded.about, reason = excluded.reason, importance = excluded.importance, event_at = excluded.event_at,
        window_start = excluded.window_start, window_end = excluded.window_end, ping_at = excluded.ping_at,
-       closes_when = excluded.closes_when, updated_at = excluded.updated_at
+       closes_when = excluded.closes_when, updated_at = excluded.updated_at, spontaneous = excluded.spontaneous
      returning *`,
     [input.userId, input.kind, input.about, input.reason ?? "", input.importance, input.eventAt ?? null, input.windowStart,
-      input.windowEnd, input.pingAt, input.closesWhen ?? "", dedupeKey(input.kind, input.about), input.sourceMessageId ?? null, input.at],
+      input.windowEnd, input.pingAt, input.closesWhen ?? "", dedupeKey(input.kind, input.about), input.sourceMessageId ?? null, input.at, input.spontaneous ?? false],
   );
   return agendaFromRow(rows[0]!);
 }

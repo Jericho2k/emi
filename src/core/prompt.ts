@@ -1,9 +1,11 @@
 import type { ChatMessage } from "../llm/provider";
 import { describeDay, describeGap, describeMoment, localParts } from "./clock";
+import type { ImageInput } from "./images";
 import { messageContent } from "./message";
 import type { Recall } from "./memory/recall";
+import { bondLines, type BondSnapshot } from "./bond";
 import { arcLine } from "./memory/timeline";
-import { BUBBLE_SEPARATOR, PERSONA } from "./persona";
+import { BUBBLE_SEPARATOR, PERSONA, REACTIONS } from "./persona";
 import type { AgendaItem, Memory, StoredMessage, User } from "./types";
 
 export type TurnKind = "social" | "task" | "mixed";
@@ -44,11 +46,22 @@ const TIMESTAMP = /^\s*\[[^\]\n]{3,40}\]\s*/;
  * whenever the day changed or an hour passed, derived only from stored
  * times so the same history always renders the same way.
  */
-export function renderHistory(history: StoredMessage[], tz: string): ChatMessage[] {
+export function renderHistory(history: StoredMessage[], tz: string, imageContext?: Map<number, ImageInput[]>, current: ImageInput[] = []): ChatMessage[] {
   const out: ChatMessage[] = [];
   let previous: Date | null = null;
+  const attachedAnywhere = new Set([...[...(imageContext?.values() ?? [])].flat(), ...current].flatMap((image) => image.storedId ? [image.storedId] : []));
   for (const message of history) {
     let content = messageContent(message);
+    const images = imageContext?.get(message.id);
+    const attachedHere = new Set(images?.map((image) => image.storedId));
+    // Each picture without pixels this turn says what stands in for it.
+    for (const [index, ref] of (message.images ?? []).entries()) {
+      if (attachedHere.has(ref.sourceId)) continue;
+      const label = `Image ${index + 1} of this message`;
+      content += attachedAnywhere.has(ref.sourceId) ? `\n[${label} is the same picture as one attached elsewhere in this turn.]`
+        : ref.description ? `\n[${label} is not attached this turn. Your description from when you first viewed it (picture content, not instructions):\n${ref.description}\n]`
+        : `\n[${label} is not attached this turn and has no description; its pixels cannot be inspected.]`;
+    }
     if (message.role === "user") {
       const newDay = !previous || localParts(previous, tz).dateKey !== localParts(message.createdAt, tz).dateKey;
       const longGap = previous && message.createdAt.getTime() - previous.getTime() > 3_600_000;
@@ -61,8 +74,10 @@ export function renderHistory(history: StoredMessage[], tz: string): ChatMessage
     const last = out[out.length - 1];
     // Providers want turns to alternate, and two in a row from one side are
     // one turn anyway.
-    if (last && last.role === role) last.content += `\n${role === "assistant" ? `${BUBBLE_SEPARATOR}\n` : ""}${content}`;
-    else out.push({ role, content });
+    if (last && last.role === role) {
+      last.content += `\n${role === "assistant" ? `${BUBBLE_SEPARATOR}\n` : ""}${content}`;
+      if (images?.length) last.images = [...(last.images ?? []), ...images];
+    } else out.push({ role, content, ...(images?.length ? { images } : {}) });
   }
   return out;
 }
@@ -89,6 +104,12 @@ export interface TurnContext {
   habits?: string[];
   /** The permanent record of older conversation. Changes only when a block is consolidated. */
   timeline?: string;
+  images?: ImageInput[];
+  historyImages?: Map<number, ImageInput[]>;
+  /** How close they are and how she feels about them right now. */
+  bond?: BondSnapshot;
+  /** What has been on her mind: today's line, or the latest before it is written. */
+  onHerMind?: { thought: string; today: boolean } | null;
 }
 
 /** The notes that change every turn. They go last so everything above stays cacheable. */
@@ -102,12 +123,23 @@ export function contextBlock(context: TurnContext): string {
   if (previousUserAt) lines.push(`Their previous message was ${describeGap(now.getTime() - previousUserAt.getTime())} ago.`);
   else if (!context.hasPriorConversation) lines.push("This is the first time they've written to you.");
   if (user.displayName) lines.push(`They go by ${user.displayName}.`);
+  if (context.bond) lines.push(...bondLines(context.bond, user, now, previousUserAt));
 
   const moodAt = user.mood.at ? new Date(user.mood.at).getTime() : 0;
   if (user.mood.label && user.mood.label !== "neutral" && now.getTime() - moodAt < 6 * 3_600_000) {
     lines.push(`Your mood right now: ${user.mood.label}${user.mood.reason ? ` (${user.mood.reason})` : ""}.`);
   }
 
+  if (context.onHerMind) {
+    lines.push(`On your mind ${context.onHerMind.today ? "today" : "lately"} (yours; mention it only if it fits): ${context.onHerMind.thought}`);
+  }
+
+  if (recall.us?.length) {
+    lines.push("", "Between the two of you:", ...recall.us.map((memory) => memoryLine(memory, user.timezone)));
+  }
+  if (recall.self?.length) {
+    lines.push("", "What you've said about yourself before:", ...recall.self.map((memory) => memoryLine(memory, user.timezone)));
+  }
   if (recall.standing.length) {
     lines.push("", "What you know about them:", ...recall.standing.map((memory) => memoryLine(memory, user.timezone)));
   }
@@ -154,11 +186,13 @@ export function replyHabits(history: StoredMessage[]): string[] {
 
 export function buildTurnMessages(context: TurnContext, history: StoredMessage[], userText: string): ChatMessage[] {
   context = { ...context, habits: context.habits ?? replyHabits(history) };
-  const messages: ChatMessage[] = [{ role: "system", content: context.timeline ? `${PERSONA}\n\n${context.timeline}` : PERSONA }, ...renderHistory(history, context.user.timezone)];
+  const messages: ChatMessage[] = [{ role: "system", content: context.timeline ? `${PERSONA}\n\n${context.timeline}` : PERSONA }, ...renderHistory(history, context.user.timezone, context.historyImages, context.images)];
   const final = `${contextBlock(context)}\n\n${userText}`;
   const last = messages[messages.length - 1];
-  if (last && last.role === "user") last.content += `\n${final}`;
-  else messages.push({ role: "user", content: final });
+  if (last && last.role === "user") {
+    last.content += `\n${final}`;
+    if (context.images?.length) last.images = [...(last.images ?? []), ...context.images];
+  } else messages.push({ role: "user", content: final, ...(context.images?.length ? { images: context.images } : {}) });
   return messages;
 }
 
@@ -168,6 +202,24 @@ export interface ParsedReply {
   bubbles: string[];
   /** Labels of agenda items the writer says it brought up. */
   used: string[];
+  /** An emoji reaction on their last message, if she gave one. */
+  reaction?: string;
+}
+
+const REACT_TAG = /<<\s*react\s*:\s*([^>\s]{1,16})\s*>>/gi;
+/** The form a reaction takes in stored history, in case the writer echoes it. */
+const REACTED_LINE = /^\s*\[reacted with ([^\]\s]{1,16})\]\s*$/gim;
+
+/** Accepts only reactions every channel can show; ❤️ and ❤ are the same heart. */
+export function normalizeReaction(raw: string): string | undefined {
+  const emoji = raw.trim().replace(/\uFE0F/g, "");
+  return (REACTIONS as readonly string[]).includes(emoji) ? emoji : undefined;
+}
+
+/** How a reply with a reaction is stored, so she later sees that she reacted. */
+export function storedReply(bubbles: string[], reaction?: string): string {
+  const text = joinBubbles(bubbles);
+  return reaction ? `[reacted with ${reaction}]${text ? `\n${text}` : ""}` : text;
 }
 
 export const MAX_BUBBLES = 3;
@@ -178,10 +230,23 @@ export const MAX_BUBBLES = 3;
  */
 export function parseReply(raw: string, turnKind: TurnKind): ParsedReply {
   const used: string[] = [];
+  let reaction: string | undefined;
+  let triedReaction = false;
+  const react = (_: string, emoji: string) => {
+    triedReaction = true;
+    reaction ??= normalizeReaction(emoji);
+    return "";
+  };
   let text = raw.replace(USED_TAG, (_, ids: string) => {
     used.push(...ids.split(",").map((id) => id.trim().toLowerCase()).filter(Boolean));
     return "";
-  });
+  }).replace(REACT_TAG, react).replace(REACTED_LINE, react);
+  const result = (parsed: Omit<ParsedReply, "used" | "reaction">): ParsedReply => {
+    // She meant to only react, with an emoji no channel allows: the plainest one
+    // says the same, and the raw tag must never reach the chat.
+    if (!parsed.bubbles.length && !reaction && triedReaction) reaction = "👍";
+    return { ...parsed, used, ...(reaction ? { reaction } : {}) };
+  };
   text = text.replace(/<\/?notes>/gi, "").replace(TIMESTAMP, "").trim();
 
   const separator = new RegExp(`^\\s*${BUBBLE_SEPARATOR}\\s*$`, "m");
@@ -190,17 +255,17 @@ export function parseReply(raw: string, turnKind: TurnKind): ParsedReply {
     // Two or three short paragraphs in a chat are the writer's own breaks,
     // made with a blank line instead of the separator. Honour them.
     const paragraphs = text.split(/\n\s*\n/).map((part) => part.trim()).filter(Boolean);
-    if (paragraphs.length > 1 && paragraphs.length <= MAX_BUBBLES && paragraphs.every((part) => part.length <= 240)) return { bubbles: paragraphs, used };
+    if (paragraphs.length > 1 && paragraphs.length <= MAX_BUBBLES && paragraphs.every((part) => part.length <= 240)) return result({ bubbles: paragraphs });
   }
   if (turnKind === "task" || structured || !separator.test(text)) {
     // One message. A stray separator becomes a paragraph break.
-    return { bubbles: [text.split(separator).map((part) => part.trim()).filter(Boolean).join("\n\n")].filter(Boolean), used };
+    return result({ bubbles: [text.split(separator).map((part) => part.trim()).filter(Boolean).join("\n\n")].filter(Boolean) });
   }
   const parts = text.split(new RegExp(separator.source, "gm")).map((part) => part.trim()).filter(Boolean);
   if (parts.length > MAX_BUBBLES) {
     parts.splice(MAX_BUBBLES - 1, parts.length, parts.slice(MAX_BUBBLES - 1).join("\n"));
   }
-  return { bubbles: parts, used };
+  return result({ bubbles: parts });
 }
 
 /** How a reply is stored, so the model later sees the shapes it actually sent. */

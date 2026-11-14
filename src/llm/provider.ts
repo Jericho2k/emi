@@ -1,6 +1,9 @@
+import type { ImageInput } from "../core/images";
+
 export interface ChatMessage {
   role: "system" | "user" | "assistant";
   content: string;
+  images?: ImageInput[];
 }
 
 export interface Usage {
@@ -17,7 +20,7 @@ export interface Citation {
 
 /** Carries billed usage even when the provider never produced a usable answer. */
 export class LlmResponseError extends Error {
-  readonly kind: "unusable" | "request_failed" | "web_unavailable";
+  readonly kind: "unusable" | "request_failed" | "web_unavailable" | "image_unavailable";
   constructor(message: string, public readonly usage: Usage, options?: ErrorOptions & { kind?: LlmResponseError["kind"] }) {
     super(message, options);
     this.kind = options?.kind ?? "unusable";

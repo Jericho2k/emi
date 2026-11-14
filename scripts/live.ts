@@ -11,6 +11,7 @@
  *   /memory            what she has stored
  *   /agenda            what she plans to bring up
  *   /timeline          the long-history record
+ *   /bond              how close she thinks you are, and what is on her mind
  *   /usage             what this run has cost
  * In a scenario file, lines starting with # are comments.
  */
@@ -20,7 +21,9 @@ import { PGlite } from "@electric-sql/pglite";
 import { vector } from "@electric-sql/pglite-pgvector";
 import { pendingItems } from "../src/core/agenda/store";
 import { describeMoment } from "../src/core/clock";
+import { bondSnapshot } from "../src/core/bond";
 import { runExtraction } from "../src/core/extraction";
+import { ensureInnerDay } from "../src/core/inner";
 import { activeMemories } from "../src/core/memory/store";
 import { runConsolidation, timelineFor } from "../src/core/memory/timeline";
 import { handleTurn } from "../src/core/pipeline";
@@ -28,6 +31,7 @@ import { tick } from "../src/core/proactive";
 import type { Deps } from "../src/core/types";
 import { getUser, updateUser, userForChannel } from "../src/core/users";
 import { migrate, type Db } from "../src/db";
+import { providerOrder } from "../src/config";
 import { openRouter } from "../src/llm/openrouter";
 
 const key = process.env.OPENROUTER ?? process.env.EMI_SHARED_OPENROUTER_KEY;
@@ -44,11 +48,15 @@ const db: Db = {
 await migrate(db);
 
 let offsetMs = 0;
-const llm = openRouter(key, { webEnabled: process.env.EMI_WEB_ENABLED === "true" });
+const writerModel = process.env.EMI_WRITER_MODEL ?? "deepseek/deepseek-v4.1-flash";
+const llm = openRouter(key, {
+  webEnabled: process.env.EMI_WEB_ENABLED === "true",
+  providers: providerOrder([[writerModel, process.env.EMI_WRITER_PROVIDER ?? (process.env.EMI_WRITER_MODEL ? "" : "baidu/fp8,deepinfra/fp8")]]),
+});
 const deps: Deps = {
   db, clock: () => new Date(Date.now() + offsetMs), random: Math.random, llmFor: () => llm,
   models: {
-    writer: process.env.EMI_WRITER_MODEL ?? "deepseek/deepseek-v4.1-flash",
+    writer: writerModel,
     utility: process.env.EMI_UTILITY_MODEL ?? "z-ai/glm-5.3-flash",
     embedding: process.env.EMI_EMBEDDING_MODEL ?? "qwen/qwen3-embedding-8b",
   },
@@ -72,6 +80,11 @@ async function handle(line: string): Promise<void> {
   } else if (line === "/memory") {
     const memories = await activeMemories(db, userId);
     console.log(memories.length ? memories.map((m) => `  [${m.kind}${m.occurredOn ? ` ${m.occurredOn}` : ""}] ${m.content}`).join("\n") : "  (no memories)");
+  } else if (line === "/bond") {
+    const bond = await bondSnapshot(db, user, deps.clock());
+    console.log(`  ${bond.stage.name} · closeness ${bond.closeness.toFixed(2)} · ${bond.familiarity.activeDays} days, ${bond.familiarity.userMessages} messages, ${bond.familiarity.memories} memories`);
+    console.log(`  warmth ${(user.bond.warmth ?? 0.5).toFixed(2)} · trust ${(user.bond.trust ?? 0.4).toFixed(2)} · irritation ${bond.irritation.toFixed(2)}`);
+    for (const day of user.innerDays) console.log(`  [${day.day}] ${day.thought}`);
   } else if (line === "/timeline") {
     console.log((await timelineFor(db, user)) || "  (no timeline yet)");
   } else if (line === "/agenda") {
@@ -84,12 +97,14 @@ async function handle(line: string): Promise<void> {
   } else {
     say("you", line);
     const result = await handleTurn(deps, userId, line);
+    if (result.reaction) say("emi", `(reacts ${result.reaction})`);
     for (const bubble of result.bubbles) say("emi", bubble);
     if (!result.problem) {
       const summary = await runExtraction(deps, userId, { memoryIds: result.recalledIds });
       if (summary && Object.values(summary).some(Boolean)) console.log(`  (kept: ${JSON.stringify(summary)})`);
       const consolidated = await runConsolidation(deps, userId);
       if (consolidated?.arcs) console.log(`  (timeline: +${consolidated.arcs} arc, ${consolidated.folds} folds)`);
+      await ensureInnerDay(deps, userId);
     }
   }
 }

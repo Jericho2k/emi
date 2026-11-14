@@ -7,8 +7,9 @@ import { describeMoment, hasTimeOfDay, isValidTimeZone, localParts, localToUtc }
 import { decide, evidenceIsExact, looksSensitive, type Candidate } from "./memory/reconcile";
 import { activeMemories, deleteMemory, insertMemory, memoriesByIds, nearestMemories, supersedeMemory, type Neighbour } from "./memory/store";
 import { messageContent } from "./message";
+import { applySignals, type Signal } from "./bond";
 import { MOOD_LABELS } from "./persona";
-import { MEMORY_KINDS, type AgendaItem, type Deps, type Memory, type MemoryKind, type User } from "./types";
+import { USER_MEMORY_KINDS, type AgendaItem, type Deps, type Memory, type MemoryKind, type UserMemoryKind, type User } from "./types";
 import { getUser, lowerInitiative, messagesAfter, recordUsage, updateUser } from "./users";
 
 /**
@@ -57,6 +58,21 @@ Return one JSON object with these fields:
 
 "forget": stored memories (by id like "m3") that the person explicitly asked Emi to forget, or said are wrong and should be removed. Each {"id": "m3", "evidence": an EXACT quote of that request}. Only on an explicit request; a changed fact is "supersedes", not this.
 
+"emi_memories": durable things about EMI herself or about the two of them. Most exchanges have none. Each:
+  {"kind": "self" | "us",
+   "content": one plain sentence that stands on its own,
+   "evidence": an EXACT quote copied from the messages (see below for whose),
+   "supersedes": the id of a listed self/us memory this replaces because it changed, else null}
+  self = something Emi said about herself that she should stay consistent with later: an opinion or taste she stated, a promise or plan she made to them, a story she told about her own thinking. Write it about Emi ("Emi thinks the Oxford comma is non-negotiable", "Emi promised to quiz them on Spanish verbs on Friday"). The evidence must be quoted from EMI's messages.
+  us = something that belongs to the two of them: a nickname or pet name either uses for the other, a running joke or bit, a shared moment worth remembering (a first "i miss you", a date-like evening of talking), a small ritual like saying goodnight. Write it plainly ("They call Emi 'gremlin'", "Running joke: their plant Gerald is plotting against them"). The evidence may be quoted from either side.
+  A fact about their life is an ordinary memory, not "us": it becomes "us" only once the two of them have made it a bit, a name or a shared reference.
+  Never task content (code, explanations, answers she gave), never small talk, nothing that only mattered in the moment.
+
+"bond": how this exchange moved the relationship, or null if it did not (the usual case). {"warmth": -1 | 0 | 1, "trust": -1 | 0 | 1, "irritation": -1 | 0 | 1, "reason": a few words}.
+  warmth 1 = a genuinely warm, fun or romantic exchange (they flirted back, were sweet to her, laughed with her, thanked her and meant it); -1 = they were cold or dismissive toward her, or turned her flirting down.
+  trust 1 = they confided something personal or vulnerable, or came back to say her advice helped; -1 only if they deliberately deceived or manipulated her.
+  irritation 1 = they were rude, insulting or demeaning TO HER (frustration with a bug, the world or themselves does not count); -1 = they apologised or clearly made up.
+
 "ping_reaction": only when a recent check-in from Emi is shown. How they took it: "satisfied" (they answered it), "later" (not now, but fine to ask again), "brushoff" (they don't want to be checked on), or "none" (their message is unrelated).
 
 "mood": how the exchange leaves EMI feeling, or null if nothing changed. {"label": one of ${MOOD_LABELS.join(", ")}, "reason": a few words}.
@@ -67,7 +83,7 @@ Return one JSON object with these fields:
 
 const text = (max: number) => z.string().trim().min(1).max(max);
 const MemorySchema = z.object({
-  kind: z.enum(MEMORY_KINDS as [MemoryKind, ...MemoryKind[]]),
+  kind: z.enum(USER_MEMORY_KINDS as [UserMemoryKind, ...UserMemoryKind[]]),
   content: text(300),
   evidence: text(500),
   occurred_on: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).nullish(),
@@ -82,6 +98,17 @@ const AgendaSchema = z.object({
   when: z.string().nullish(),
   evidence: text(500),
   closes_when: z.string().trim().max(200).nullish(),
+});
+const SharedSchema = z.object({
+  kind: z.enum(["self", "us"]),
+  content: text(300),
+  evidence: text(500),
+  supersedes: z.string().nullish(),
+});
+const SignalSchema = z.coerce.number().int().min(-1).max(1).catch(0).transform((value) => value as Signal);
+const BondSchema = z.object({
+  warmth: SignalSchema.default(0), trust: SignalSchema.default(0), irritation: SignalSchema.default(0),
+  reason: z.string().trim().max(80).nullish(),
 });
 const CloseSchema = z.object({ id: z.string(), note: z.string().max(200).nullish() });
 const ForgetSchema = z.object({ id: z.string(), evidence: text(500) });
@@ -124,6 +151,8 @@ async function extract(deps: Deps, userId: string, hintIds: string[]): Promise<E
   if (!last) return null;
   const theirs = batch.filter((message) => message.role === "user" && message.kind !== "command");
   const source = theirs.map((message) => message.content).join("\n");
+  // Her own words, for what she said about herself. Commands are the app's, not hers.
+  const hers = batch.filter((message) => message.role === "emi" && message.kind !== "command").map((message) => message.content).join("\n");
   const now = deps.clock();
   const summary: ExtractionSummary = { memoriesAdded: 0, memoriesSuperseded: 0, agendaCreated: 0, agendaClosed: 0, memoriesForgotten: 0 };
   const done = async () => { await updateUser(db, userId, { extractedThrough: last.id }); return summary; };
@@ -190,7 +219,12 @@ async function extract(deps: Deps, userId: string, hintIds: string[]): Promise<E
     await updateUser(db, userId, { displayName: data.display_name.trim() });
   }
 
-  await applyMemories(deps, user, list(MemorySchema, data.memories, 6), source, memoryLabels, last.id, now, summary);
+  const quotedBy = (text: string) => (item: { evidence: string }) => evidenceIsExact(item.evidence, text);
+  await applyMemories(deps, user, list(MemorySchema, data.memories, 6).filter(quotedBy(source)), memoryLabels, last.id, now, summary);
+  const shared = list(SharedSchema, data.emi_memories, 3)
+    .filter((item) => (item.kind === "self" ? quotedBy(hers)(item) : quotedBy(`${source}\n${hers}`)(item)))
+    .map((item) => ({ ...item, occurred_on: null, storyline: null }));
+  await applyMemories(deps, user, shared, memoryLabels, last.id, now, summary);
   await applyAgenda(deps, user, list(AgendaSchema, data.agenda, 3), source, last.id, now, summary);
 
   for (const close of list(CloseSchema, data.agenda_close, 6)) {
@@ -208,6 +242,12 @@ async function extract(deps: Deps, userId: string, hintIds: string[]): Promise<E
   }
   if (awaiting) await applyReaction(deps, user, awaiting, String(data.ping_reaction ?? "none"), now);
 
+  const bond = BondSchema.safeParse(data.bond);
+  if (bond.success && (bond.data.warmth || bond.data.trust || bond.data.irritation)) {
+    const fresh = (await getUser(db, userId)) ?? user;
+    await updateUser(db, userId, { bond: applySignals(fresh.bond, { ...bond.data, reason: bond.data.reason ?? undefined }, now) });
+  }
+
   const mood = data.mood as { label?: unknown; reason?: unknown } | null | undefined;
   if (mood && typeof mood.label === "string" && (MOOD_LABELS as readonly string[]).includes(mood.label)) {
     await updateUser(db, userId, { mood: { label: mood.label, reason: typeof mood.reason === "string" ? mood.reason.slice(0, 80) : undefined, at: now.toISOString() } });
@@ -215,11 +255,21 @@ async function extract(deps: Deps, userId: string, hintIds: string[]): Promise<E
   return done();
 }
 
+interface ProposedMemory {
+  kind: MemoryKind;
+  content: string;
+  evidence: string;
+  occurred_on?: string | null;
+  supersedes?: string | null;
+  storyline?: string | null;
+}
+
+/** Writes memories whose evidence the caller has already checked against the right speaker. */
 async function applyMemories(
-  deps: Deps, user: User, proposed: z.infer<typeof MemorySchema>[], source: string,
+  deps: Deps, user: User, proposed: ProposedMemory[],
   labels: Array<{ label: string; memory: Memory }>, sourceMessageId: number, now: Date, summary: ExtractionSummary,
 ): Promise<void> {
-  const accepted = proposed.filter((item) => evidenceIsExact(item.evidence, source) && !looksSensitive(item.content) && !looksSensitive(item.evidence));
+  const accepted = proposed.filter((item) => !looksSensitive(item.content) && !looksSensitive(item.evidence));
   if (!accepted.length) return;
 
   // One embedding call for the whole batch; the vectors both find stored

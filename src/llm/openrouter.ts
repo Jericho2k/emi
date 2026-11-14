@@ -94,31 +94,63 @@ function parseReply(data: Record<string, unknown>, web: boolean) {
   return { text: chatText(message.content).trim(), refusal: message.refusal, finish: String(choice.finish_reason ?? "unknown"), truncated: choice.finish_reason === "length", failed: false, citations: citationsFrom(message.annotations) };
 }
 
-export function openRouter(apiKey: string, config: { webEnabled?: boolean } = {}): Llm {
+export interface OpenRouterConfig {
+  webEnabled?: boolean;
+  /**
+   * Preferred providers per model id. A model on OpenRouter is served by
+   * several companies at different prices, and prompt caching only works when
+   * the same one answers every turn. With this, that provider is asked first;
+   * the others remain as fallbacks, so an outage costs a cache miss, not a reply.
+   */
+  providers?: Record<string, string[]>;
+}
+
+export function openRouter(apiKey: string, config: OpenRouterConfig = {}): Llm {
   const webEnabled = config.webEnabled ?? true;
   return {
     capabilities: { web: webEnabled },
     async chat(messages: ChatMessage[], options: ChatOptions) {
       const web = !!options.web && webEnabled && !options.json;
+      const hasImages = messages.some((message) => message.images?.length);
+      if (messages.some((message) => message.images?.length && message.role !== "user")) throw new Error("images must be attached to user messages");
+      const responses = web || hasImages;
+      const input = messages.map((message) => message.images?.length ? {
+        role: message.role,
+        content: [
+          { type: "input_text", text: message.content },
+          ...message.images.flatMap((image, index) => [
+            { type: "input_text", text: `Image ${index + 1}${image.origin === "reply" ? " (replied-to picture)" : ""}:` },
+            { type: "input_image", image_url: `data:${image.mimeType};base64,${Buffer.from(image.data).toString("base64")}`, detail: "high" },
+          ]),
+        ],
+      } : { role: message.role, content: message.content });
       let budget = Math.max(options.maxTokens ?? 1500, 2048);
       let usage: Usage = { model: options.model, inputTokens: 0, outputTokens: 0, costUsd: 0 };
       for (let attempt = 0; attempt < 2; attempt += 1) {
-        const common = { model: options.model, temperature: options.temperature ?? 0.7, reasoning: { effort: "low", exclude: true } };
-        const body = web ? {
-          ...common, input: messages, max_output_tokens: budget,
-          tools: [
+        const order = config.providers?.[options.model];
+        const common = {
+          model: options.model, temperature: options.temperature ?? 0.7, reasoning: { effort: "low", exclude: true },
+          ...(order?.length ? { provider: { order, allow_fallbacks: true } } : {}),
+        };
+        const body = responses ? {
+          ...common, input, max_output_tokens: budget,
+          ...(options.json ? { text: { format: { type: "json_object" } } } : {}),
+          ...(web ? { tools: [
             { type: "openrouter:web_search", parameters: { engine: "exa", max_results: 3, max_total_results: 6, max_uses: 2, max_characters: 4000 } },
             { type: "openrouter:web_fetch", parameters: { engine: "openrouter", max_uses: 2, max_content_tokens: 6000 } },
           ],
-          max_tool_calls: 4,
+          max_tool_calls: 4 } : {}),
         } : {
           ...common, messages, max_tokens: budget, usage: { include: true },
           ...(options.json ? { response_format: { type: "json_object" } } : {}),
         };
         let data;
         try {
-          data = await post(apiKey, web ? "/responses" : "/chat/completions", body, web ? 120_000 : 90_000, !web);
+          data = await post(apiKey, responses ? "/responses" : "/chat/completions", body, responses ? 120_000 : 90_000, !responses);
         } catch (error) {
+          if (hasImages && error instanceof ProviderError && error.status === 400) {
+            throw new LlmResponseError(`Image request rejected: model=${options.model} status=400`, usage, { cause: error, kind: "image_unavailable" });
+          }
           if (web && error instanceof ProviderError && (error.status === 400 || error.status === 403)) {
             throw new LlmResponseError(`Web request rejected: model=${options.model} status=${error.status}; check OpenRouter tool/model permissions`, usage, { cause: error, kind: "web_unavailable" });
           }
@@ -127,7 +159,7 @@ export function openRouter(apiKey: string, config: { webEnabled?: boolean } = {}
           throw error;
         }
         usage = addUsage(usage, usageFrom(data, options.model));
-        const parsed = parseReply(data, web);
+        const parsed = parseReply(data, responses);
         const validJson = !options.json || parseJsonObject(parsed.text) !== null;
         if (parsed.text && validJson && !parsed.truncated && !parsed.failed) return { text: parsed.text, usage, citations: parsed.citations };
         if (typeof parsed.refusal === "string" && parsed.refusal.trim() && !options.json) return { text: parsed.refusal, usage };
