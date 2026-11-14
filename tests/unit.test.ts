@@ -5,7 +5,7 @@ import { inQuietHours, localDaysBetween, localParts, localToUtc, nextAwake } fro
 import { decryptKey, encryptKey } from "../src/core/keys";
 import { admit } from "../src/core/memory/recall";
 import { decide, evidenceIsExact, looksSensitive, type Candidate } from "../src/core/memory/reconcile";
-import { classifyTurn, historyWindow, parseReply, renderHistory } from "../src/core/prompt";
+import { classifyTurn, historyWindow, parseReply, renderHistory, replyHabits } from "../src/core/prompt";
 import { lowerInitiative } from "../src/core/users";
 import type { Memory, StoredMessage } from "../src/core/types";
 
@@ -132,6 +132,9 @@ describe("prompt", () => {
     expect(parseReply("omg\n---\ntell me everything", "social").bubbles).toEqual(["omg", "tell me everything"]);
     expect(parseReply("a\n---\nb\n---\nc\n---\nd", "social").bubbles).toEqual(["a", "b", "c\nd"]);
     expect(parseReply("one thought", "social").bubbles).toEqual(["one thought"]);
+    // A blank line between short chat lines is the same choice, spelled differently.
+    expect(parseReply("yeah i've had it\n\nwhat should i look up?", "social").bubbles).toEqual(["yeah i've had it", "what should i look up?"]);
+    expect(parseReply(`${"long ".repeat(60)}\n\nsecond paragraph`, "mixed").bubbles).toHaveLength(1);
   });
   it("never splits a task answer or anything structured", () => {
     expect(parseReply("here\n---\n```js\nx\n```", "social").bubbles).toHaveLength(1);
@@ -141,12 +144,20 @@ describe("prompt", () => {
     const parsed = parseReply("[Fri 13 Nov 2026, 22:04]\nhow did the interview go?\n<<used:a1>>", "social");
     expect(parsed).toEqual({ bubbles: ["how did the interview go?"], used: ["a1"] });
   });
+  it("names a reply habit only once it has formed", () => {
+    const reply = (content: string, id: number): StoredMessage => ({ id, role: "emi", kind: "reply", content, agendaItemId: null, createdAt: now });
+    expect(replyHabits([reply("one\n---\ntwo?", 1), reply("just one", 2)])).toEqual([]);
+    const habits = replyHabits([reply("a\n---\nb?", 1), reply("c\n---\nd?", 2)]);
+    expect(habits).toHaveLength(2);
+    expect(habits[0]).toContain("single short message");
+    expect(habits[1]).toContain("Don't ask one this time");
+  });
   it("moves the history window in blocks so the prompt prefix stays stable", () => {
     expect(historyWindow(10)).toBe(10);
     expect([50, 51, 60, 69].map((total) => total - historyWindow(total))).toEqual([20, 20, 20, 20]);
     expect(70 - historyWindow(70)).toBe(40);
   });
-  it("marks saved command responses without mislabeling adjacent AI replies or losing quote context", () => {
+  it("shows a command and what the app displayed on the person's side, never in Emi's voice", () => {
     const base = { agendaItemId: null, createdAt: now };
     const history: StoredMessage[] = [
       { ...base, id: 1, role: "user", kind: "command", content: "/timezone probe-482" },
@@ -155,12 +166,12 @@ describe("prompt", () => {
       { ...base, id: 4, role: "user", kind: "reply", content: "that one", replyTo: { author: "emi", text: "invalid timezone" } },
     ];
     const rendered = renderHistory(history, "UTC");
-    const assistant = rendered.find((m) => m.role === "assistant")!.content;
-    expect(assistant).toContain("App-generated command response");
-    expect(assistant).toContain("invalid timezone");
-    expect(assistant).toContain("[End app-generated command response]\n---\nhere's what happened");
+    expect(rendered.map((m) => m.role)).toEqual(["user", "assistant", "user"]);
+    expect(rendered[0]!.content).toContain("[They used a command: /timezone probe-482]");
+    expect(rendered[0]!.content).toContain("This is what it showed them:\ninvalid timezone\n]");
+    expect(rendered[1]!.content).toBe("here's what happened");
     expect(rendered.at(-1)!.content).toContain('"author":"emi","text":"invalid timezone"');
-    expect(rendered.at(-1)!.content).not.toContain("App-generated command response");
+    expect(rendered.at(-1)!.content).not.toContain("They used a command");
     expect(history[1]!.content).toBe("invalid timezone");
   });
   it("stamps a message when the day changes or an hour passes, and merges same-side turns", () => {

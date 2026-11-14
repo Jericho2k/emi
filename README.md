@@ -38,6 +38,22 @@ npm test
 npm run typecheck
 ```
 
+## Try her in a terminal
+
+To talk to Emi with real models but no Telegram and no database, using a throwaway in-process Postgres:
+
+```bash
+OPENROUTER=sk-or-... npm run live
+```
+
+Type `+3h` or `+1d` to move the clock forward and let her act on her own, and `/memory`, `/agenda` or `/usage` to see her state. To replay a scripted conversation:
+
+```bash
+OPENROUTER=sk-or-... npm run live scripts/scenario.txt
+```
+
+The key is read from the environment only. Never put it in a file in this repository.
+
 ## What a person can control
 
 | Command | What it does |
@@ -51,17 +67,28 @@ npm run typecheck
 | `/timezone <Area/City>` | Where you are. Telling her your city in chat works too. |
 | `/quiet <from> <to>` | Hours she stays silent. |
 | `/usage`, `/cap <usd>` | Today's cost, and the daily limit on what she spends unasked. |
+| `/export` | A JSON file with everything she holds: messages, memories, plans, timeline and settings. Never the API key. |
+| `/wipe yes` | Erases the whole conversation and everything learned from it. Settings and the key stay. |
 
 ## Telegram conversation context
 
 Commands and the confirmations Emi actually sends are saved in the same
 conversation history as chat. `/key` arguments are redacted before storage;
-the key itself is still stored only in its encrypted field. In model context,
-commands are labeled as user commands and their confirmations as app-generated
-responses, so Emi can distinguish the app's actions from her own generated
-replies. These labels appear only in model context; Telegram messages, stored
-text, and Emi's persona stay unchanged. Existing saved command exchanges get
-the labels when read, without a database migration.
+the key itself is still stored only in its encrypted field.
+
+Emi sees commands, and she knows what they are. Her persona says that the
+memory and the agenda are her own, lists the commands, and says the app
+answers them without her. In model context a command and what the app
+displayed both sit on the person's side of the history, as "they used a
+command" followed by what was shown, so nothing she did not write is in her
+voice. This framing matters: when the app was presented as a separate thing,
+she disowned her own agenda and talked about transcripts. The wording exists
+only in model context; Telegram messages and stored text are unchanged, and
+saved command exchanges are reframed when read, with no migration.
+
+Asking her in conversation to drop an agenda item or forget something works
+like the commands do. The extractor closes the item or erases the memory, and
+only when the request is quoted from the person's own message.
 
 Replies carry a separate snapshot of the original text or caption and any
 selected quote, including replies to messages outside the recent history
@@ -160,9 +187,23 @@ Existing agenda rows are not deleted by this update and expire normally.
 
 If you write first, she raises a follow-up or initiative in that conversation, and its ping is cancelled. A ping needs several hours of silence, respects quiet hours and a daily budget, and is never sent while an earlier check-in is unanswered. The message is written at send time against the current conversation, and the writer may decide to hold it. Three brush-offs in a row lower her initiative one step.
 
+**Long history** (`src/core/memory/timeline.ts`). The writer sees the newest 30 to 49 messages in full. When a block of 20 leaves that window, one cheap call writes an arc for exactly those messages: a chapter summary and a one-line headline. The newest arcs appear as headlines; a run of six arcs is folded once into a chapter, and a run of six chapters once into a part. Nothing folded is summarised again, so the order of events cannot drift, and the record grows only logarithmically with the length of the chat. It sits right after the persona in the prompt and changes only when a block is consolidated. When a turn is about an old chapter, that chapter's full summary is added to the turn's notes.
+
+One limit to know: `/forget` erases a memory, but a chapter summary written earlier may still mention the same fact. `/wipe` erases everything.
+
+## Deploy on Railway
+
+Emi is a worker: she polls Telegram and runs a scheduler, and serves no HTTP. The repository has a `Dockerfile` and a `railway.toml`.
+
+1. In Railway, create a project from this GitHub repository and pick the branch to deploy.
+2. Under Variables, add `TELEGRAM_BOT_TOKEN`, `DATABASE_URL` and `EMI_MASTER_KEY`, plus any optional ones from `.env.example`. Use the same `EMI_MASTER_KEY` you used before, or keys stored with `/key` can no longer be read.
+3. For `DATABASE_URL` with Supabase, use the session pooler connection string (the host ending in `pooler.supabase.com`). Railway has no outbound IPv6, and Supabase's direct connection is IPv6 only.
+4. Deploy. The log should show `[emi] running`. Migrations are applied on start.
+
+Run exactly one instance. Stop any copy on your own machine first: two processes polling the same bot each receive only some of the messages, and Telegram answers one of them with a 409 conflict.
+
 ## Not built yet
 
-- Long-history consolidation (the folded timeline). History beyond the recent window is reachable only through extracted memories.
 - A web page for memory; `/memory` and `/forget` cover it in chat for now.
 - Voice, images and files.
 - Streaming replies.

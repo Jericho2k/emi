@@ -2,6 +2,7 @@ import type { ChatMessage } from "../llm/provider";
 import { describeDay, describeGap, describeMoment, localParts } from "./clock";
 import { messageContent } from "./message";
 import type { Recall } from "./memory/recall";
+import { arcLine } from "./memory/timeline";
 import { BUBBLE_SEPARATOR, PERSONA } from "./persona";
 import type { AgendaItem, Memory, StoredMessage, User } from "./types";
 
@@ -54,7 +55,9 @@ export function renderHistory(history: StoredMessage[], tz: string): ChatMessage
       if (newDay || longGap) content = `[${describeMoment(message.createdAt, tz)}]\n${content}`;
     }
     previous = message.createdAt;
-    const role = message.role === "user" ? "user" : "assistant";
+    // What the app displayed for a command sits on the person's side of the
+    // history, next to the command: nothing Emi did not write is in her voice.
+    const role = message.role === "user" || message.kind === "command" ? "user" : "assistant";
     const last = out[out.length - 1];
     // Providers want turns to alternate, and two in a row from one side are
     // one turn anyway.
@@ -82,6 +85,10 @@ export interface TurnContext {
   /** When they last wrote before this message. */
   previousUserAt: Date | null;
   hasPriorConversation?: boolean;
+  /** Corrections for a pattern her recent replies have fallen into. */
+  habits?: string[];
+  /** The permanent record of older conversation. Changes only when a block is consolidated. */
+  timeline?: string;
 }
 
 /** The notes that change every turn. They go last so everything above stays cacheable. */
@@ -107,6 +114,9 @@ export function contextBlock(context: TurnContext): string {
   if (recall.relevant.length) {
     lines.push("", "Things you remember that relate to this:", ...recall.relevant.map((memory) => memoryLine(memory, user.timezone)));
   }
+  if (recall.arcs?.length) {
+    lines.push("", "From your earlier conversations, in more detail, because it relates to this:", ...recall.arcs.map((arc) => arcLine(arc, user.timezone)));
+  }
   if (weave.length) {
     lines.push("", "Things you've been meaning to bring up (at most one, only if it fits, after dealing with what they wrote):");
     weave.forEach((item, index) => {
@@ -114,6 +124,7 @@ export function contextBlock(context: TurnContext): string {
       lines.push(`- ${agendaLabel(index)}: ${item.about}${whenText}${item.reason ? `. Why you care: ${item.reason}` : ""}`);
     });
   }
+  if (turnKind !== "task" && context.habits?.length) lines.push("", ...context.habits);
   lines.push("", turnKind === "task" ? "This message looks like a task: answer it fully in one message."
     : turnKind === "mixed" ? "This message looks like a question inside a chat: answer it properly, in your own voice."
     : "This message looks like chatting.");
@@ -121,8 +132,29 @@ export function contextBlock(context: TurnContext): string {
   return lines.join("\n");
 }
 
+/**
+ * A model that sees its own last replies copies their shape, so two-message
+ * replies or a question on every turn become a habit within a few turns. A
+ * fixed rhythm would be just as mechanical. So the habit is named only when
+ * it has actually formed, and only for the next reply.
+ */
+export function replyHabits(history: StoredMessage[]): string[] {
+  const recent = history.filter((message) => message.role === "emi" && message.kind === "reply").slice(-2);
+  if (recent.length < 2) return [];
+  const habits: string[] = [];
+  const separator = new RegExp(`^\\s*${BUBBLE_SEPARATOR}\\s*$`, "m");
+  if (recent.every((message) => separator.test(message.content))) {
+    habits.push("Your last two replies were each several messages. Unless they asked for something long, make this one a single short message.");
+  }
+  if (recent.every((message) => /\?\s*$/.test(message.content))) {
+    habits.push("You ended your last two replies with a question. Don't ask one this time.");
+  }
+  return habits;
+}
+
 export function buildTurnMessages(context: TurnContext, history: StoredMessage[], userText: string): ChatMessage[] {
-  const messages: ChatMessage[] = [{ role: "system", content: PERSONA }, ...renderHistory(history, context.user.timezone)];
+  context = { ...context, habits: context.habits ?? replyHabits(history) };
+  const messages: ChatMessage[] = [{ role: "system", content: context.timeline ? `${PERSONA}\n\n${context.timeline}` : PERSONA }, ...renderHistory(history, context.user.timezone)];
   const final = `${contextBlock(context)}\n\n${userText}`;
   const last = messages[messages.length - 1];
   if (last && last.role === "user") last.content += `\n${final}`;
@@ -154,6 +186,12 @@ export function parseReply(raw: string, turnKind: TurnKind): ParsedReply {
 
   const separator = new RegExp(`^\\s*${BUBBLE_SEPARATOR}\\s*$`, "m");
   const structured = /```|^\s*(?:[-*]|\d+\.)\s|^#{1,6}\s/m.test(text);
+  if (turnKind !== "task" && !structured && !separator.test(text)) {
+    // Two or three short paragraphs in a chat are the writer's own breaks,
+    // made with a blank line instead of the separator. Honour them.
+    const paragraphs = text.split(/\n\s*\n/).map((part) => part.trim()).filter(Boolean);
+    if (paragraphs.length > 1 && paragraphs.length <= MAX_BUBBLES && paragraphs.every((part) => part.length <= 240)) return { bubbles: paragraphs, used };
+  }
   if (turnKind === "task" || structured || !separator.test(text)) {
     // One message. A stray separator becomes a paragraph break.
     return { bubbles: [text.split(separator).map((part) => part.trim()).filter(Boolean).join("\n\n")].filter(Boolean), used };

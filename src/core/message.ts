@@ -2,7 +2,7 @@ import type { IncomingMessage, StoredMessage } from "./types";
 
 /**
  * Model-facing context only. Stored and user-visible text stays unchanged.
- * Quoted text is not a new assertion; command output is not model reasoning.
+ * Quoted text is not a new assertion; command output is not something Emi said.
  */
 export function messageContent(message: IncomingMessage | StoredMessage): string {
   const text = "text" in message ? message.text : message.content;
@@ -16,12 +16,9 @@ export function messageContent(message: IncomingMessage | StoredMessage): string
   ].join("\n") : text;
 
   if (!("kind" in message) || message.kind !== "command") return content;
-  if (message.role === "user") {
-    return `[User command, handled by the application]\n${content}\n[End user command]`;
-  }
-  return [
-    "[App-generated command response: automatically sent by the application, not composed by you. It records what the app displayed, not your own reasoning or choice.]",
-    content,
-    "[End app-generated command response]",
-  ].join("\n");
+  // Commands are shown to Emi in her own world's terms: the person looked at
+  // or adjusted her, and the app answered. Framing the app as a stranger made
+  // her disown her own agenda and talk about transcripts.
+  if (message.role === "user") return `[They used a command: ${content}]`;
+  return `[The app answered that at once, without you. This is what it showed them:\n${content}\n]`;
 }

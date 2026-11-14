@@ -1,0 +1,13 @@
+# A short run through the main behaviours. Costs a few cents.
+hey! i'm sam, i live in berlin and work as a backend dev
+ugh i have a job interview tomorrow at 10am at a fintech, kinda nervous
+how do i reverse a string in python?
+/memory
+/agenda
+# The next afternoon, after the interview: does she ask on her own?
++1d
++5h
+it went ok i think! they want a second round next week
+/memory
+/agenda
+/usage

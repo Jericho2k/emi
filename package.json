@@ -9,6 +9,7 @@
   "scripts": {
     "start": "tsx src/index.ts",
     "dev": "tsx watch src/index.ts",
+    "live": "tsx scripts/live.ts",
     "typecheck": "tsc --noEmit",
     "test": "vitest run"
   },

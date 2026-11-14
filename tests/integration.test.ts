@@ -153,6 +153,19 @@ describe("bringing things up", () => {
     expect((await status(w.db, item.id)).status).toBe("pending"); // still there if they come back
   });
 
+  it("offers an item once per conversation, so an ignored question is not asked again", async () => {
+    const { w, user } = await withInterview();
+    w.advance(9 * HOUR);
+    w.script = () => "noted";
+    await handleTurn(w.deps, user.id, "ugh what a day");
+    await handleTurn(w.deps, user.id, "anyway");
+    const offered = w.calls.filter((call) => call.options.model === "writer").map((call) => call.messages.at(-1)!.content.includes("a1: job interview"));
+    expect(offered).toEqual([true, false]);
+    w.advance(13 * HOUR);
+    await handleTurn(w.deps, user.id, "morning");
+    expect(w.calls.at(-1)!.messages.at(-1)!.content).toContain("a1: job interview");
+  });
+
   it("closes the item when they tell her how it went on their own", async () => {
     const { w, user, item } = await withInterview();
     w.advance(9 * HOUR);
@@ -261,6 +274,24 @@ describe("the daily planner", () => {
 });
 
 describe("forgetting", () => {
+  it("forgets in conversation only when they really asked", async () => {
+    const w = await world();
+    const user = await w.newUser();
+    const add = (content: string) => insertMemory(w.db, { userId: user.id, kind: "identity", content, embedding: fakeEmbedding(content), at: w.now });
+    await add("Works at a bank");
+    await add("Has a cat called Miso");
+    await handleTurn(w.deps, user.id, "please forget that I work at a bank");
+    w.script = byModel({ utility: (messages) => {
+      const id = (content: string) => new RegExp(`(m\\d+) \\[identity\\] ${content}`).exec(messages[1]!.content)![1];
+      return JSON.stringify({ forget: [
+        { id: id("Works at a bank"), evidence: "forget that I work at a bank" },
+        { id: id("Has a cat called Miso"), evidence: "forget the cat" }, // not something they said
+      ] });
+    } });
+    expect((await runExtraction(w.deps, user.id))?.memoriesForgotten).toBe(1);
+    expect((await activeMemories(w.db, user.id)).map((m) => m.content)).toEqual(["Has a cat called Miso"]);
+  });
+
   it("blanks the text, not just the flag", async () => {
     const w = await world();
     const user = await w.newUser();

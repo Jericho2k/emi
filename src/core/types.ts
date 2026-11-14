@@ -26,6 +26,7 @@ export interface User {
   lastUserMessageAt: Date | null;
   lastEmiMessageAt: Date | null;
   extractedThrough: number;
+  consolidatedThrough: number;
   lastPlannedOn: string | null;
   createdAt: Date;
 }

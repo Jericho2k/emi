@@ -1,9 +1,11 @@
-import { Bot, type Context } from "grammy";
+import { Bot, InputFile, type Context } from "grammy";
 import type { Config } from "../config";
+import { exportAccount, wipeAccount } from "../core/account";
 import { pendingItems } from "../core/agenda/store";
 import { describeMoment, isValidTimeZone } from "../core/clock";
 import { runExtraction } from "../core/extraction";
 import { encryptKey } from "../core/keys";
+import { runConsolidation } from "../core/memory/timeline";
 import { activeMemories, deleteMemory, findByShortId, insertMemory } from "../core/memory/store";
 import { handleTurn } from "../core/pipeline";
 import { INITIATIVE_LEVELS, type Deps, type Initiative, type IncomingMessage, type Outbound, type User } from "../core/types";
@@ -25,6 +27,8 @@ const HELP = [
   "/timezone <Area/City> — where you are, e.g. Europe/Berlin",
   "/quiet <from> <to> — hours I stay silent, e.g. /quiet 23 8",
   "/usage — what today has cost, and /cap <usd> to change the limit on what I spend unasked",
+  "/export — a file with everything I hold about you",
+  "/wipe — erase our whole conversation and everything I remember",
 ].join("\n");
 
 export function createTelegram(deps: Deps, config: Config): { bot: Bot; outbound: Outbound } {
@@ -190,6 +194,20 @@ export function createTelegram(deps: Deps, config: Config): { bot: Bot; outbound
     return reply(`cap set to $${value.toFixed(2)} a day.`);
   });
 
+  command("export", async (ctx, user, _arg, reply) => {
+    const data = await exportAccount(deps.db, user.id, deps.clock());
+    await ctx.replyWithDocument(new InputFile(Buffer.from(JSON.stringify(data, null, 2)), "emi-export.json"));
+    return reply("that's everything: messages, memories, plans and settings. your API key is not in it.");
+  });
+
+  command("wipe", async (_ctx, user, arg, reply) => {
+    if (arg.toLowerCase() !== "yes") {
+      return reply("this erases our whole conversation and everything i remember about you. it can't be undone. /export first if you want a copy, then send /wipe yes.");
+    }
+    await wipeAccount(deps.db, user.id);
+    return reply("done. everything is erased. your settings and key are still here, so you can just start talking again.");
+  });
+
   // ---- conversation ----
 
   async function runTurn(userId: string, chatId: number, messages: IncomingMessage[]): Promise<void> {
@@ -199,7 +217,11 @@ export function createTelegram(deps: Deps, config: Config): { bot: Bot; outbound
       const result = await handleTurn(deps, userId, messages);
       clearInterval(typing);
       await sendBubbles(chatId, result.bubbles);
-      if (!result.problem) void runExtraction(deps, userId, { memoryIds: result.recalledIds }).catch((error) => console.warn("[extraction]", error));
+      if (!result.problem) {
+        void runExtraction(deps, userId, { memoryIds: result.recalledIds })
+          .then(() => runConsolidation(deps, userId))
+          .catch((error) => console.warn("[background]", error));
+      }
     } catch (error) {
       console.error("[turn] failed", error);
       await bot.api.sendMessage(chatId, "something broke on my side. try that again in a moment.").catch(() => undefined);

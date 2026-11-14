@@ -1,5 +1,6 @@
 import type { Db } from "../../db";
 import type { Memory, MemoryKind } from "../types";
+import { relevantArcs, type Arc } from "./timeline";
 import { activeMemories, lexicalMemories, markRelevant, nearestMemories } from "./store";
 
 /**
@@ -55,11 +56,14 @@ export interface Recall {
   standing: Memory[];
   /** Admitted for this turn on relevance, in the order things happened. */
   relevant: Memory[];
+  /** Chapters of older conversation that this turn is about. */
+  arcs: Arc[];
 }
 
 export async function recall(db: Db, userId: string, queryText: string, queryVector: number[] | null, now: Date): Promise<Recall> {
   const all = await activeMemories(db, userId);
-  if (!all.length) return { standing: [], relevant: [] };
+  const arcs = queryVector ? await relevantArcs(db, userId, queryVector) : [];
+  if (!all.length) return { standing: [], relevant: [], arcs };
 
   const standing = [
     ...all.filter((memory) => memory.pinned),
@@ -91,5 +95,5 @@ export async function recall(db: Db, userId: string, queryText: string, queryVec
   const storylines = new Set(admitted.map((memory) => memory.storyline).filter((name): name is string => !!name));
   const extra = all.filter((memory) => memory.storyline && storylines.has(memory.storyline) && !taken.has(memory.id)).slice(-STORYLINE_EXTRA);
 
-  return { standing, relevant: [...admitted, ...extra].sort((a, b) => when(a) - when(b)) };
+  return { standing, relevant: [...admitted, ...extra].sort((a, b) => when(a) - when(b)), arcs };
 }

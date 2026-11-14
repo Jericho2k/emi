@@ -63,7 +63,7 @@ describe("Telegram conversation continuity", () => {
     expect((await t.user()).timezone).toBe("Europe/Moscow");
   });
 
-  it("identifies an invalid timezone response as app-generated without changing the visible exchange", async () => {
+  it("shows Emi a command and its output as the person adjusting her, without changing the visible exchange", async () => {
     const t = await setup();
     await t.send("/timezone probe-482");
     const confirmation = "i have nothing yet. send it like /timezone Europe/Berlin, or just tell me your city.";
@@ -72,14 +72,16 @@ describe("Telegram conversation continuity", () => {
     await t.send("/agenda");
     const messages = t.w.calls[0]!.messages;
     const command = messages.find((m) => m.role === "user" && m.content.includes("/timezone probe-482"))!;
-    const response = messages.find((m) => m.role === "assistant" && m.content.includes(confirmation))!;
-    expect(command.content).toContain("[User command, handled by the application]");
-    expect(response.content).toContain("App-generated command response");
-    expect(response.content).toContain("not your own reasoning or choice");
-    expect(response.content).toContain("[End app-generated command response]");
+    expect(command.content).toContain("[They used a command: /timezone probe-482]");
+    expect(command.content).toContain(`This is what it showed them:\n${confirmation}`);
+    // Nothing the app displayed is ever put in Emi's own voice.
+    expect(messages.some((m) => m.role === "assistant" && m.content.includes(confirmation))).toBe(false);
+    // She is told what the commands are and that the agenda and memory are hers.
+    expect(messages[0]!.content).toContain("/agenda shows what you plan to bring up");
+    expect(messages[0]!.content).toContain("Both are yours.");
     const stored = await recentMessages(t.w.db, (await t.user()).id, 20);
     expect(stored.find((m) => m.role === "emi" && m.kind === "command")?.content).toBe(confirmation);
-    expect(t.sent.join("\n")).not.toContain("App-generated command response");
+    expect(t.sent.join("\n")).not.toContain("They used a command");
     expect(t.w.calls).toHaveLength(1);
   });
 

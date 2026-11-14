@@ -20,6 +20,9 @@ const TICK_MS = 30_000;
 async function main() {
   const config = loadConfig();
   const pool = new pg.Pool({ connectionString: config.databaseUrl, max: 10 });
+  // An idle connection dropped by the database or the network must not take
+  // the process down; the pool opens a new one on the next query.
+  pool.on("error", (error) => console.warn("[db] idle connection lost:", error.message));
   const db = pgDb(pool);
   const applied = await migrate(db);
   if (applied.length) console.log(`[db] applied ${applied.join(", ")}`);
@@ -34,7 +37,8 @@ async function main() {
     try {
       await tick(deps, outbound);
     } catch (error) {
-      console.error("[tick]", error);
+      // One line, not a stack: a network outage would otherwise fill the log.
+      console.error("[tick]", error instanceof Error ? error.message : error);
     } finally {
       ticking = false;
     }
@@ -59,6 +63,9 @@ async function main() {
   console.log("[emi] running");
   await bot.start();
 }
+
+// A stray rejection in background work is logged and survived, not fatal.
+process.on("unhandledRejection", (reason) => console.error("[unhandled]", reason instanceof Error ? reason.message : reason));
 
 main().catch((error) => {
   console.error(error instanceof Error ? error.message : error);

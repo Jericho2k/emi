@@ -1,0 +1,10 @@
+[build]
+builder = "DOCKERFILE"
+dockerfilePath = "Dockerfile"
+
+# Emi is a worker: she polls Telegram and runs a scheduler, and serves no HTTP,
+# so there is no health check path. Exactly one instance may run at a time;
+# two would both poll Telegram and each would see only some of the messages.
+[deploy]
+numReplicas = 1
+restartPolicyType = "ALWAYS"

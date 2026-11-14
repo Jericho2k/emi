@@ -2,9 +2,10 @@ import { z } from "zod";
 import { LlmResponseError, parseJsonObject, type ChatMessage } from "../llm/provider";
 import { DAILY_PING_BUDGET, SILENCE_HOURS } from "./agenda/policy";
 import { claimDuePings, expireStale, hasOpenInitiative, setPing, setStatus, upsertAgendaItem } from "./agenda/store";
-import { describeMoment, inQuietHours, localParts, localToUtc, nextAwake } from "./clock";
+import { describeGap, describeMoment, inQuietHours, localParts, localToUtc, nextAwake } from "./clock";
 import { runExtraction } from "./extraction";
 import { activeMemories } from "./memory/store";
+import { sweepConsolidation } from "./memory/timeline";
 import { messageContent } from "./message";
 import { webContext } from "./web";
 import { PERSONA } from "./persona";
@@ -55,6 +56,8 @@ async function compose(deps: Deps, user: User, item: AgendaItem, now: Date): Pro
     : [
       "Nobody wrote to you. You are writing first, because you thought of them.",
       `What it's about: "${item.about}".`,
+      // Without this she guesses, and "yesterday" for something from this morning reads as not having listened.
+      item.eventAt ? `When it was for them: ${describeMoment(item.eventAt, user.timezone)}, which is ${describeGap(now.getTime() - item.eventAt.getTime())} ago.` : "",
       item.reason ? `Why you care: ${item.reason}.` : "",
       item.attempts > 0 ? "You already asked about this once and they said later." : "",
       "Read the conversation above first. If they already told you how this went, if the conversation has moved somewhere this would be intrusive, or if it simply no longer makes sense, reply with exactly HOLD.",
@@ -231,4 +234,5 @@ export async function tick(deps: Deps, outbound: Outbound): Promise<void> {
   await runDuePings(deps, outbound);
   await runDailyPlanner(deps);
   await sweepExtraction(deps);
+  await sweepConsolidation(deps);
 }
