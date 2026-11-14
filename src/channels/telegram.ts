@@ -1,6 +1,7 @@
 import { Bot, InputFile, type Context } from "grammy";
 import type { Message, ReactionTypeEmoji } from "grammy/types";
 import type { Config } from "../config";
+import { ConversationReset, conversationEffect, inConversation } from "../core/conversation";
 import { exportAccount, wipeAccount } from "../core/account";
 import { pendingItems } from "../core/agenda/store";
 import { describeMoment, isValidTimeZone } from "../core/clock";
@@ -260,6 +261,10 @@ export function createTelegram(deps: Deps, config: Config): { bot: Bot; outbound
   }
 
   async function runTurn(userId: string, chatId: number, batch: PendingInput[]): Promise<void> {
+    await inConversation(deps, userId, (deps) => runScopedTurn(deps, userId, chatId, batch));
+  }
+
+  async function runScopedTurn(deps: Deps, userId: string, chatId: number, batch: PendingInput[]): Promise<void> {
     const started = Date.now();
     const kind = classifyTurn(batch.map((item) => item.input.text).join("\n"));
     const paced = !!config.pacing && isPaced(kind) && !batch.some((item) => telegramImageFile(item.message));
@@ -284,23 +289,30 @@ export function createTelegram(deps: Deps, config: Config): { bot: Bot; outbound
       const result = await handleTurn(deps, userId, messages);
       stopTyping();
       const last = batch.at(-1)?.message;
-      if (result.reaction && last) await react(chatId, last.message_id, result.reaction, result.bubbles.length > 0);
-      await sendBubbles(chatId, result.bubbles, paced ? bubbleWaits(result.bubbles, Date.now() - started, deps.random) : undefined);
+      await conversationEffect(deps.db, async () => {
+        if (result.reaction && last) await react(chatId, last.message_id, result.reaction, result.bubbles.length > 0);
+        await sendBubbles(chatId, result.bubbles, paced ? bubbleWaits(result.bubbles, Date.now() - started, deps.random) : undefined);
+      });
       if (!result.problem) {
-        void afterTurn(deps, userId, result).catch((error) => console.warn("[background]", error));
+        void afterTurn(deps, userId, result).catch((error) => { if (!(error instanceof ConversationReset)) console.warn("[background]", error); });
         // Written while the person reads the reply, ready before the picture
         // stops being attached to follow-ups.
-        void describeImages(deps, userId).catch((error) => console.warn("[background]", error));
+        void describeImages(deps, userId).catch((error) => { if (!(error instanceof ConversationReset)) console.warn("[background]", error); });
       }
     } catch (error) {
+      if (error instanceof ConversationReset) throw error;
       if (error instanceof ImageInputError) {
-        for (const item of batch) await addMessage(deps.db, { userId, role: "user", content: item.input.text || "[Image upload unavailable]", replyTo: item.input.replyTo, at: deps.clock() });
-        await bot.api.sendMessage(chatId, error.message);
-        await addMessage(deps.db, { userId, role: "emi", content: error.message, kind: "command", at: deps.clock() });
+        await conversationEffect(deps.db, async () => {
+          for (const item of batch) await addMessage(deps.db, { userId, role: "user", content: item.input.text || "[Image upload unavailable]", replyTo: item.input.replyTo, at: deps.clock() });
+          await bot.api.sendMessage(chatId, error.message);
+          await addMessage(deps.db, { userId, role: "emi", content: error.message, kind: "command", at: deps.clock() });
+        });
         return;
       }
       console.error("[turn] failed", error);
-      await bot.api.sendMessage(chatId, "something broke on my side. try that again in a moment.").catch(() => undefined);
+      await conversationEffect(deps.db, () => bot.api.sendMessage(chatId, "something broke on my side. try that again in a moment.")).catch((error) => {
+        if (error instanceof ConversationReset) throw error;
+      });
     } finally {
       stopTyping();
     }

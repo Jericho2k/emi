@@ -1,3 +1,4 @@
+import { ConversationReset, inConversation } from "./conversation";
 import type { ImageMime } from "./images";
 import type { Deps } from "./types";
 import { getUser, recordUsage } from "./users";
@@ -31,6 +32,10 @@ export const MAX_DESCRIPTION_CHARS = 8000;
 
 /** Describes this person's stored pictures that have no description yet. Returns how many were written. */
 export async function describeImages(deps: Deps, userId: string): Promise<number> {
+  return (await inConversation(deps, userId, (deps) => describeOnce(deps, userId))) ?? 0;
+}
+
+async function describeOnce(deps: Deps, userId: string): Promise<number> {
   const { db } = deps;
   const user = await getUser(db, userId);
   const llm = user && deps.llmFor(user);
@@ -70,9 +75,10 @@ export async function describeImages(deps: Deps, userId: string): Promise<number
       await db.query("update message_images set description = $2, describing_at = null where id = $1", [row.id, description]);
       written += 1;
     } catch (error) {
+      if (error instanceof ConversationReset) throw error;
       const usage = error && typeof error === "object" && "usage" in error ? (error as { usage: Parameters<typeof recordUsage>[3] }).usage : null;
-      if (usage) await recordUsage(db, userId, "describe_image_failed", usage, deps.clock()).catch(() => undefined);
-      await db.query("update message_images set describing_at = null where id = $1", [row.id]).catch(() => undefined);
+      if (usage) await recordUsage(db, userId, "describe_image_failed", usage, deps.clock()).catch((error) => { if (error instanceof ConversationReset) throw error; });
+      await db.query("update message_images set describing_at = null where id = $1", [row.id]).catch((error) => { if (error instanceof ConversationReset) throw error; });
       // The picture keeps falling back to bounded pixel replay; nothing is lost.
       console.warn("[image:describe]", { reason: error instanceof Error ? error.message.slice(0, 160) : "unknown" });
     }

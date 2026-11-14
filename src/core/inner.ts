@@ -1,5 +1,6 @@
 import type { Db } from "../db";
 import { LlmResponseError, parseJsonObject } from "../llm/provider";
+import { ConversationReset, inConversation } from "./conversation";
 import { localParts } from "./clock";
 import { INTERESTS } from "./persona";
 import type { Deps, InnerDay, User } from "./types";
@@ -81,8 +82,12 @@ export async function sweepInnerDays(deps: Deps, limit = 20): Promise<number> {
 
 /** Writes today's line if there is none yet. Never on the reply path. */
 export async function ensureInnerDay(deps: Deps, userId: string): Promise<string | null> {
+  return inConversation(deps, userId, (deps) => writeInnerDay(deps, userId));
+}
+
+async function writeInnerDay(deps: Deps, userId: string): Promise<string | null> {
   const user = await getUser(deps.db, userId);
-  if (!user) return null;
+  if (!user?.lastUserMessageAt) return null;
   const now = deps.clock();
   const existing = todayLine(user, now);
   if (existing) return existing;
@@ -115,6 +120,7 @@ export async function ensureInnerDay(deps: Deps, userId: string): Promise<string
     await updateUser(deps.db, user.id, { innerDays: [...(fresh?.innerDays ?? user.innerDays).filter((day) => day.day !== today), line].slice(-KEPT) });
     return line.thought;
   } catch (error) {
+    if (error instanceof ConversationReset) throw error;
     if (error instanceof LlmResponseError) await recordUsage(deps.db, user.id, "inner_day_failed", error.usage, now);
     console.warn("[inner] failed", error instanceof Error ? error.message : error);
     return fail();

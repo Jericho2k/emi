@@ -48,6 +48,25 @@ async function setup(failSend: (text: string) => boolean = () => false) {
 }
 
 describe("Telegram conversation continuity", () => {
+  it("starts clean in the same Telegram chat after /wipe yes, retaining only its confirmation", async () => {
+    const t = await setup();
+    await t.send("my sister is called Anna");
+    await t.send("/wipe"); // Flush the earlier chat and show the warning.
+    expect(t.sent.at(-1)).toContain("/wipe yes");
+    await t.send("/wipe yes");
+    const confirmation = t.sent.at(-1)!;
+    const user = await t.user();
+    expect(await recentMessages(t.w.db, user.id, 20)).toMatchObject([{ kind: "command", content: confirmation }]);
+    t.w.calls.length = 0;
+    await t.send("hello again");
+    await t.send("/agenda"); // Flush the new message.
+    const prompt = JSON.stringify(t.w.calls[0]!.messages);
+    expect(prompt).not.toContain("Anna");
+    expect(prompt).not.toContain("this erases our whole conversation");
+    expect(prompt).toContain(confirmation);
+    expect(prompt).toContain("hello again");
+  });
+
   it("shows /start, /timezone and their actual confirmations to the next writer call", async () => {
     const t = await setup();
     await t.send("/start");

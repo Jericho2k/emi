@@ -30,7 +30,7 @@ import { handleTurn } from "../src/core/pipeline";
 import { tick } from "../src/core/proactive";
 import type { Deps } from "../src/core/types";
 import { getUser, updateUser, userForChannel } from "../src/core/users";
-import { migrate, type Db } from "../src/db";
+import { migrate, transactionalDb, type Db } from "../src/db";
 import { openRouter } from "../src/llm/openrouter";
 
 const key = process.env.OPENROUTER ?? process.env.EMI_SHARED_OPENROUTER_KEY;
@@ -40,10 +40,13 @@ if (!key) {
 }
 
 const pg = await PGlite.create({ extensions: { vector } });
-const db: Db = {
+const db: Db = transactionalDb({
   query: async (sql, params = []) => ({ rows: (await pg.query(sql, params as unknown[])).rows as never[] }),
   exec: async (sql) => { await pg.exec(sql); },
-};
+}, (work) => pg.transaction(async (tx) => work({
+  query: async (sql, params = []) => ({ rows: (await tx.query(sql, params)).rows as never[] }),
+  exec: async (sql) => { await tx.exec(sql); },
+})));
 await migrate(db);
 
 let offsetMs = 0;
