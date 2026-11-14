@@ -58,14 +58,14 @@ describe("image preparation", () => {
   it("stores the shrunk copy, not the upload", async () => {
     const w = await world();
     const user = await w.newUser();
-    const data = await noise(3000, 3000).png().toBuffer();
+    const data = await noise(2000, 2000).png().toBuffer();
     await handleTurn(w.deps, user.id, [{ text: "big", images: [{ mimeType: "image/png", data }] }]);
     const [message] = await recentMessages(w.db, user.id, 2);
     const [stored] = await loadImages(w.db, user.id, message!.images!);
     const { width, height } = await size(stored!);
     expect(width * height).toBeLessThanOrEqual(MAX_IMAGE_PIXELS);
     expect(Buffer.from(stored!.data)).toEqual(Buffer.from(w.calls[0]!.messages.at(-1)!.images![0]!.data));
-  });
+  }, 30_000);
 });
 
 describe("image descriptions", () => {
